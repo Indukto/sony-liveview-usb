@@ -68,6 +68,7 @@ public final class PtpUsbCamera implements AutoCloseable {
     private volatile boolean closed;
     private volatile boolean ready;
     private volatile boolean streaming;
+    private volatile boolean liveViewEnabled;
     private UsbDeviceConnection connection;
     private UsbEndpoint bulkIn;
     private UsbEndpoint bulkOut;
@@ -166,6 +167,7 @@ public final class PtpUsbCamera implements AutoCloseable {
                     return;
                 }
                 streaming = true;
+                liveViewEnabled = true;
                 // The a6300/Imaging Edge trace uses 0x9209 as a short polling
                 // operation. It has a data phase: the camera answers with a
                 // 1252-byte D221 status container that spans three USB bulk
@@ -173,14 +175,14 @@ public final class PtpUsbCamera implements AutoCloseable {
                 // readUntilResponse consumes the data container and returns
                 // on the response. Imaging Edge polls ten times before the
                 // first virtual-object request.
-                for (int poll = 0; poll < 10 && !closed; poll++) {
+                for (int poll = 0; poll < 10 && !closed && liveViewEnabled; poll++) {
                     sendCommand(SONY_GET_ALL_EXT_DEVICE_INFO);
                     state("Sony LiveView readiness poll " + (poll + 1) + "/10 sent...");
                     readUntilResponse("Sony LiveView readiness poll");
                     Thread.sleep(50L);
                 }
                 state("Sony LiveView readiness polls complete; requesting virtual JPEG object.");
-                while (!closed) {
+                while (!closed && liveViewEnabled) {
                     // Sony PTP2 exposes LiveView as a virtual object rather
                     // than a UVC stream. GetObjectInfo returns the object
                     // metadata, then GetObject carries the JPEG-containing
@@ -193,13 +195,26 @@ public final class PtpUsbCamera implements AutoCloseable {
                     readUntilResponse("Sony LiveView readiness poll");
                     Thread.sleep(50L);
                 }
+                if (!closed && !liveViewEnabled) {
+                    state("Sony LiveView stopped.");
+                }
             } catch (Exception error) {
                 Log.e(TAG, "LiveView request failed", error);
                 state("LiveView request failed: " + error.getMessage());
             } finally {
                 streaming = false;
+                liveViewEnabled = false;
             }
         });
+    }
+
+    /**
+     * Asks the LiveView loop to stop at the next transaction boundary. The
+     * camera always answers the command already in flight, so the loop exits
+     * cleanly without leaving a stuck bulk read.
+     */
+    public void stopLiveView() {
+        liveViewEnabled = false;
     }
 
     private void openUsb() throws IOException {
