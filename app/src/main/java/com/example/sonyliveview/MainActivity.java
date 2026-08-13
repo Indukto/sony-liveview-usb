@@ -19,6 +19,7 @@ import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -27,6 +28,7 @@ import android.widget.TextView;
 import android.widget.ViewFlipper;
 
 import java.text.SimpleDateFormat;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
@@ -73,6 +75,7 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     private Button connectButton;
     private Button liveViewButton;
     private Button disconnectButton;
+    private CheckBox skipInfoCheck;
     private TextView logView;
     private ScrollView logScroll;
 
@@ -81,11 +84,15 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     private TextView startingView;
     private TextView videoFpsLabel;
     private TextView videoInfoLabel;
+    private TextView videoStatusLabel;
 
     private int frameCount;
     private int fpsCount;
+    private int dupCount;
     private long fpsWindowStart;
     private String lastFrameInfo = "No frames yet";
+    private byte[] lastJpeg;
+    private boolean aspectTipShown;
 
     // JPEG decode runs off the camera's read thread so decoding (10-30 ms per
     // frame) never stalls the PTP transaction loop. Only the newest frame is
@@ -158,6 +165,13 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         liveViewButton.setOnClickListener(v -> startLiveViewFromConnectionPage());
         controls.addView(liveViewButton, lp(-2, -2, 0, dp(10), 0, 0, 0));
 
+        skipInfoCheck = new CheckBox(this);
+        skipInfoCheck.setText("Skip GetObjectInfo");
+        skipInfoCheck.setTextColor(COLOR_DIM);
+        skipInfoCheck.setTextSize(12);
+        skipInfoCheck.setChecked(false);
+        controls.addView(skipInfoCheck, lp(-2, -2, 0, dp(12), 0, 0, 0));
+
         controls.addView(spacer(), lp(0, 0, 1, 0, 0, 0, 0));
 
         disconnectButton = makeButton("Disconnect", COLOR_DIM);
@@ -173,7 +187,10 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         TextView hint = new TextView(this);
         hint.setText("Connect the a6300 with USB Connection set to PC Remote.\n" +
                 "Once the PTP session is ready, LiveView starts automatically and the\n" +
-                "video takes over the screen. Stop returns here.");
+                "video takes over the screen. Stop returns here.\n" +
+                "Skip GetObjectInfo is experimental: compare the FPS/dup readout with\n" +
+                "it on and off. For best frame rate keep the camera on JPEG-only,\n" +
+                "manual focus/exposure, no DRO/HDR or effects.");
         hint.setTextColor(COLOR_DIM);
         hint.setTextSize(13);
         hint.setLineSpacing(0, 1.3f);
@@ -237,6 +254,22 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         infoParams.gravity = Gravity.TOP | Gravity.END;
         infoParams.setMargins(0, dp(40), dp(14), 0);
         page.addView(videoInfoLabel, infoParams);
+
+        videoStatusLabel = new TextView(this);
+        videoStatusLabel.setTextColor(COLOR_BUSY);
+        videoStatusLabel.setTextSize(13);
+        videoStatusLabel.setGravity(Gravity.CENTER);
+        videoStatusLabel.setPadding(dp(12), dp(6), dp(12), dp(6));
+        videoStatusLabel.setVisibility(View.GONE);
+        GradientDrawable statusBackground = new GradientDrawable();
+        statusBackground.setColor(0xCC141A20);
+        statusBackground.setStroke(dp(1), COLOR_BUSY);
+        statusBackground.setCornerRadius(dp(8));
+        videoStatusLabel.setBackground(statusBackground);
+        FrameLayout.LayoutParams statusParams = new FrameLayout.LayoutParams(-2, -2);
+        statusParams.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+        statusParams.setMargins(0, 0, 0, dp(16));
+        page.addView(videoStatusLabel, statusParams);
 
         return page;
     }
@@ -410,6 +443,7 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         if (camera == null || !connected) return;
         setButtonEnabled(liveViewButton, false);
         showVideoPage();
+        camera.setSkipObjectInfo(skipInfoCheck.isChecked());
         camera.requestLiveView();
     }
 
@@ -439,6 +473,12 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
             } else if (message.startsWith("USB/PTP error")) {
                 connected = false;
                 showConnectionPage(COLOR_ERR, "Error");
+            } else if (message.startsWith("LiveView error") ||
+                    message.startsWith("Restarting the USB session")) {
+                // Keep the video page up during automatic recovery and show
+                // the progress on an overlay instead of hiding the stream.
+                videoStatusLabel.setVisibility(View.VISIBLE);
+                videoStatusLabel.setText("RECOVERING: " + message);
             }
         });
     }
@@ -454,6 +494,7 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
             setButtonEnabled(liveViewButton, true);
             // Take over the screen with the video stream.
             showVideoPage();
+            camera.setSkipObjectInfo(skipInfoCheck.isChecked());
             camera.requestLiveView();
         });
     }
@@ -464,20 +505,31 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         // does cheap counters plus a one-line log, never a JPEG decode.
         int currentFrame = ++frameCount;
         fpsCount++;
+        // Consecutive identical JPEGs mean the camera served a stale frame
+        // (it had not produced a new one yet). They are counted but not
+        // decoded, so the FPS overlay shows how many are genuinely new.
+        if (Arrays.equals(jpeg, lastJpeg)) {
+            dupCount++;
+        } else {
+            lastJpeg = jpeg;
+            latestJpeg.set(jpeg);
+            decoderExecutor.execute(this::decodeAndShow);
+        }
         long now = SystemClock.elapsedRealtime();
         if (fpsWindowStart == 0) fpsWindowStart = now;
         long elapsed = now - fpsWindowStart;
         if (elapsed >= 1000) {
             final int fps = (int) Math.round(fpsCount * 1000.0 / elapsed);
+            final int dups = dupCount;
             fpsCount = 0;
+            dupCount = 0;
             fpsWindowStart = now;
-            runOnUiThread(() -> videoFpsLabel.setText("FPS " + fps));
+            final String interval = fps > 0 ? String.format(Locale.US, "%dms", 1000 / fps) : "-";
+            runOnUiThread(() -> videoFpsLabel.setText("FPS " + fps + " · dup " + dups + " · " + interval));
         }
         if (currentFrame == 1 || currentFrame % 30 == 0) {
             Log.d(TAG, "JPEG frames received=" + currentFrame + " latestBytes=" + jpeg.length);
         }
-        latestJpeg.set(jpeg);
-        decoderExecutor.execute(this::decodeAndShow);
     }
 
     /** Runs on the decoder thread; decodes only the newest pending frame. */
@@ -491,11 +543,18 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         }
         final int width = bitmap.getWidth();
         final int height = bitmap.getHeight();
+        final boolean showAspectTip = !aspectTipShown && width == 1024 && height == 574;
+        if (showAspectTip) aspectTipShown = true;
         lastFrameInfo = "JPEG " + width + "×" + height + " · frame #" + frameCount;
         runOnUiThread(() -> {
             previewView.setImageBitmap(bitmap);
             startingView.setVisibility(View.GONE);
+            videoStatusLabel.setVisibility(View.GONE);
             videoInfoLabel.setText(lastFrameInfo);
+            if (showAspectTip) {
+                appendStatus("Tip: camera Aspect Ratio is 16:9 (1024×574). " +
+                        "Set it to 3:2 on the camera for a taller 1024×680 live view.");
+            }
         });
     }
 

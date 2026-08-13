@@ -36,7 +36,16 @@ public final class PtpUsbCamera implements AutoCloseable {
     private static final int PTP_OC_GET_OBJECT_INFO = 0x1008;
     private static final int PTP_OC_GET_OBJECT = 0x1009;
     private static final int USB_TRANSFER_TIMEOUT_MS = 15000;
+    // Live-view frames arrive every ~90 ms, so a transaction that yields no
+    // data for three seconds is broken. A short streaming timeout makes
+    // transient camera hiccups surface in seconds instead of freezing the
+    // UI for 45 s, and the recovery loop below then restarts the stream.
+    private static final int STREAM_READ_TIMEOUT_MS = 3000;
     private static final int USB_READ_RETRIES = 3;
+    // Automatic recovery attempts for a broken stream: the first retry just
+    // re-synchronizes on the same session, later retries rebuild the whole
+    // USB session. Beyond this the app gives up and asks for a power cycle.
+    private static final int MAX_LIVEVIEW_RETRIES = 3;
     // Bulk IN reads must use buffers that are a multiple of the endpoint's
     // max packet size (512). A short header read (e.g. exactly 12 bytes)
     // against an incoming 512-byte packet causes a USB overflow on Android
@@ -45,10 +54,11 @@ public final class PtpUsbCamera implements AutoCloseable {
     // made of several 512-byte packets plus a short packet (e.g. the
     // 0x9209 D221 container is 512 + 512 + 228 bytes), so always read a
     // large 512-aligned chunk and parse containers out of the buffered
-    // stream, keeping the remainder for the next container. Sized above the
-    // largest captured frame container (~132 KB) so one GetObject JPEG arrives
-    // in a single read.
-    private static final int USB_READ_CHUNK = 256 * 1024;
+    // stream, keeping the remainder for the next container. 64 KB is a
+    // universally safe bulk-transfer size on Android; the two reads a ~132 KB
+    // frame container needs cost microseconds compared to the camera's frame
+    // generation time, so there is no reason to risk device URB-size limits.
+    private static final int USB_READ_CHUNK = 64 * 1024;
 
     // Experimental: the Imaging Edge capture polls 0x9209 once between every
     // GetObject, so this defaults to keeping it. Setting it to true removes
@@ -59,13 +69,18 @@ public final class PtpUsbCamera implements AutoCloseable {
     // Sony PTP extension commands found in the Monitor+ binary and public PTP traces.
     private static final int SONY_SDIO_CONNECT = 0x9201;
     private static final int SONY_SDIO_GET_EXT_DEVICE_INFO = 0x9202;
-    private static final int SONY_SET_CONTROL_DEVICE_A = 0x9205;
+    private static final int SONY_SET_EXT_DEVICE_PROP_VALUE = 0x9205;
     private static final int SONY_GET_ALL_EXT_DEVICE_INFO = 0x9209;
     private static final int SONY_PRIORITY_MODE = 0xD25A;
     private static final int SONY_OPERATING_MODE = 0x5013;
     private static final int SONY_STANDBY_MODE = 0x00000001;
     private static final int SONY_LIVE_VIEW_STATUS = 0xD221;
     private static final int SONY_LIVE_VIEW_OBJECT = 0xFFFFC002;
+    // NOTE: Sony's SetExtDevicePropValue (0x9205) is NOT sent to the a6300.
+    // A property write there (even a documented one such as LiveView mode
+    // 0xD26A) can STALL the camera's bulk OUT pipe at the USB level (-1 on
+    // OUT 0x02), which halts every later transaction until the camera is
+    // power-cycled.
 
     private final UsbManager usbManager;
     private final UsbDevice device;
@@ -77,6 +92,10 @@ public final class PtpUsbCamera implements AutoCloseable {
     private volatile boolean ready;
     private volatile boolean streaming;
     private volatile boolean liveViewEnabled;
+    // When true, GetObjectInfo is sent once and then skipped while GetObject
+    // keeps returning 0x2001 (one fewer PTP round trip per frame). If a
+    // GetObject fails, GetObjectInfo is re-issued to re-sync.
+    private volatile boolean skipObjectInfo = false;
     private UsbDeviceConnection connection;
     private UsbEndpoint bulkIn;
     private UsbEndpoint bulkOut;
@@ -100,29 +119,7 @@ public final class PtpUsbCamera implements AutoCloseable {
         executor.execute(() -> {
             try {
                 openUsb();
-                state("Opening PTP session (transaction 0)...");
-                sendCommand(PTP_OC_OPEN_SESSION, 1);
-                expectOk("OpenSession", readUntilResponse("OpenSession"));
-                sendCommand(PTP_OC_GET_DEVICE_INFO);
-                expectOk("GetDeviceInfo", readUntilResponse("GetDeviceInfo"));
-                // Imaging Edge performs GetStorageIDs before the Sony SDIO
-                // handshake. The a6300 returns one storage ID (0x00010000)
-                // in the data phase, so preserve this transaction instead of
-                // entering the Sony extension sequence immediately.
-                sendCommand(PTP_OC_GET_STORAGE_IDS);
-                expectOk("GetStorageIDs", readUntilResponse("GetStorageIDs"));
-                sendCommand(SONY_SDIO_CONNECT, 1, 0, 0);
-                expectOk("Sony SDIO_Connect phase 1", readUntilResponse("Sony SDIO_Connect phase 1"));
-                sendCommand(SONY_SDIO_CONNECT, 2, 0, 0);
-                expectOk("Sony SDIO_Connect phase 2", readUntilResponse("Sony SDIO_Connect phase 2"));
-                sendCommand(SONY_SDIO_GET_EXT_DEVICE_INFO, 0xC8);
-                expectOk("Sony SDIO_GetExtDeviceInfo", readUntilResponse("Sony SDIO_GetExtDeviceInfo"));
-                sendCommand(SONY_SDIO_CONNECT, 3, 0, 0);
-                expectOk("Sony SDIO_Connect phase 3", readUntilResponse("Sony SDIO_Connect phase 3"));
-                // Imaging Edge refreshes the extended-device information
-                // after phase 3, immediately before its 0x9209 polling loop.
-                sendCommand(SONY_SDIO_GET_EXT_DEVICE_INFO, 0xC8);
-                expectOk("Sony SDIO_GetExtDeviceInfo refresh", readUntilResponse("Sony SDIO_GetExtDeviceInfo refresh"));
+                handshake();
                 Thread.sleep(50L);
                 state("Sony PTP/USB session is ready.");
                 ready = true;
@@ -145,6 +142,33 @@ public final class PtpUsbCamera implements AutoCloseable {
         });
     }
 
+    /** Runs the capture-confirmed PTP session sequence (OpenSession through the SDIO connect). */
+    private void handshake() throws IOException {
+        state("Opening PTP session (transaction 0)...");
+        sendCommand(PTP_OC_OPEN_SESSION, 1);
+        expectOk("OpenSession", readUntilResponse("OpenSession"));
+        sendCommand(PTP_OC_GET_DEVICE_INFO);
+        expectOk("GetDeviceInfo", readUntilResponse("GetDeviceInfo"));
+        // Imaging Edge performs GetStorageIDs before the Sony SDIO
+        // handshake. The a6300 returns one storage ID (0x00010000)
+        // in the data phase, so preserve this transaction instead of
+        // entering the Sony extension sequence immediately.
+        sendCommand(PTP_OC_GET_STORAGE_IDS);
+        expectOk("GetStorageIDs", readUntilResponse("GetStorageIDs"));
+        sendCommand(SONY_SDIO_CONNECT, 1, 0, 0);
+        expectOk("Sony SDIO_Connect phase 1", readUntilResponse("Sony SDIO_Connect phase 1"));
+        sendCommand(SONY_SDIO_CONNECT, 2, 0, 0);
+        expectOk("Sony SDIO_Connect phase 2", readUntilResponse("Sony SDIO_Connect phase 2"));
+        sendCommand(SONY_SDIO_GET_EXT_DEVICE_INFO, 0xC8);
+        expectOk("Sony SDIO_GetExtDeviceInfo", readUntilResponse("Sony SDIO_GetExtDeviceInfo"));
+        sendCommand(SONY_SDIO_CONNECT, 3, 0, 0);
+        expectOk("Sony SDIO_Connect phase 3", readUntilResponse("Sony SDIO_Connect phase 3"));
+        // Imaging Edge refreshes the extended-device information
+        // after phase 3, immediately before its 0x9209 polling loop.
+        sendCommand(SONY_SDIO_GET_EXT_DEVICE_INFO, 0xC8);
+        expectOk("Sony SDIO_GetExtDeviceInfo refresh", readUntilResponse("Sony SDIO_GetExtDeviceInfo refresh"));
+    }
+
     /**
      * Fails the connection attempt when a handshake response is not OK.
      * Every transaction in the Imaging Edge capture (OpenSession through the
@@ -165,59 +189,142 @@ public final class PtpUsbCamera implements AutoCloseable {
         // Keep the command, its response, and the stream on the same executor.
         // Two concurrent bulk-IN readers can steal each other's PTP containers.
         executor.execute(() -> {
-            try {
-                if (closed || !ready) {
-                    state("LiveView request ignored: PTP session is not ready.");
-                    return;
-                }
-                if (streaming) {
-                    state("LiveView request ignored: a LiveView request is already active.");
-                    return;
-                }
-                streaming = true;
-                liveViewEnabled = true;
-                // The a6300/Imaging Edge trace uses 0x9209 as a short polling
-                // operation. It has a data phase: the camera answers with a
-                // 1252-byte D221 status container that spans three USB bulk
-                // transfers (512 + 512 + 228) followed by response 0x2001.
-                // readUntilResponse consumes the data container and returns
-                // on the response. Imaging Edge polls ten times before the
-                // first virtual-object request.
-                for (int poll = 0; poll < 10 && !closed && liveViewEnabled; poll++) {
-                    sendCommand(SONY_GET_ALL_EXT_DEVICE_INFO);
-                    state("Sony LiveView readiness poll " + (poll + 1) + "/10 sent...");
-                    readUntilResponse("Sony LiveView readiness poll");
-                    Thread.sleep(50L);
-                }
-                state("Sony LiveView readiness polls complete; requesting virtual JPEG object.");
-                while (!closed && liveViewEnabled) {
-                    // Sony PTP2 exposes LiveView as a virtual object rather
-                    // than a UVC stream. GetObjectInfo returns the object
-                    // metadata, then GetObject carries the JPEG-containing
-                    // data container across multiple USB bulk transfers.
-                    // No sleep here: the camera answers each transaction as
-                    // fast as it can, so the frame rate is camera-governed
-                    // instead of capped at 20 fps by a 50 ms host sleep.
-                    sendCommand(PTP_OC_GET_OBJECT_INFO, SONY_LIVE_VIEW_OBJECT);
-                    readUntilResponse("LiveView GetObjectInfo");
-                    sendCommand(PTP_OC_GET_OBJECT, SONY_LIVE_VIEW_OBJECT);
-                    readUntilResponse("LiveView GetObject");
-                    if (!SKIP_INTERFRAME_STATUS_POLL) {
-                        sendCommand(SONY_GET_ALL_EXT_DEVICE_INFO);
-                        readUntilResponse("Sony LiveView readiness poll");
+            if (closed || !ready) {
+                state("LiveView request ignored: PTP session is not ready.");
+                return;
+            }
+            if (streaming) {
+                state("LiveView request ignored: a LiveView request is already active.");
+                return;
+            }
+            liveViewEnabled = true;
+            int retries = 0;
+            boolean gaveUp = false;
+            while (!closed && liveViewEnabled) {
+                try {
+                    streaming = true;
+                    runLiveView();
+                    break;
+                } catch (Exception error) {
+                    streaming = false;
+                    Log.e(TAG, "LiveView stream error", error);
+                    retries++;
+                    if (retries > MAX_LIVEVIEW_RETRIES || closed || !liveViewEnabled) {
+                        if (retries > MAX_LIVEVIEW_RETRIES && !closed) {
+                            gaveUp = true;
+                            state("LiveView request failed after " + retries +
+                                    " attempts: " + error.getMessage());
+                            state("Camera did not recover; power-cycle the camera (off and on) and reconnect.");
+                            closed = true;
+                            closeInternal();
+                            listener.onClosed();
+                        } else {
+                            state("LiveView request failed: " + error.getMessage());
+                        }
+                        break;
+                    }
+                    state("LiveView error (" + retries + "/" + MAX_LIVEVIEW_RETRIES +
+                            "), recovering: " + error.getMessage());
+                    try {
+                        Thread.sleep(500L * retries);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                    if (!liveViewEnabled || closed) break; // user stopped meanwhile
+                    // First retry re-synchronizes the stream on the same
+                    // session; later retries rebuild the whole USB session.
+                    resetStreamState();
+                    if (retries >= 2) {
+                        state("Restarting the USB session...");
+                        try {
+                            restartSession();
+                        } catch (Exception restartError) {
+                            Log.e(TAG, "Session restart failed", restartError);
+                            gaveUp = true;
+                            state("Session restart failed: " + restartError.getMessage());
+                            state("Camera did not recover; power-cycle the camera (off and on) and reconnect.");
+                            closed = true;
+                            closeInternal();
+                            listener.onClosed();
+                            break;
+                        }
                     }
                 }
-                if (!closed && !liveViewEnabled) {
-                    state("Sony LiveView stopped.");
-                }
-            } catch (Exception error) {
-                Log.e(TAG, "LiveView request failed", error);
-                state("LiveView request failed: " + error.getMessage());
-            } finally {
-                streaming = false;
-                liveViewEnabled = false;
+            }
+            streaming = false;
+            liveViewEnabled = false;
+            if (!closed && !gaveUp) {
+                state("Sony LiveView stopped.");
             }
         });
+    }
+
+    /** Polls readiness, then pulls LiveView JPEG frames until stopped or failed. */
+    private void runLiveView() throws IOException {
+        // The a6300/Imaging Edge trace uses 0x9209 as a short polling
+        // operation. It has a data phase: the camera answers with a
+        // 1252-byte D221 status container that spans three USB bulk
+        // transfers (512 + 512 + 228) followed by response 0x2001.
+        // readUntilResponse consumes the data container and returns
+        // on the response. Imaging Edge polls ten times before the
+        // first virtual-object request.
+        for (int poll = 0; poll < 10 && !closed && liveViewEnabled; poll++) {
+            sendCommand(SONY_GET_ALL_EXT_DEVICE_INFO);
+            state("Sony LiveView readiness poll " + (poll + 1) + "/10 sent...");
+            readUntilResponse("Sony LiveView readiness poll");
+            try {
+                Thread.sleep(50L);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IOException("LiveView interrupted", interrupted);
+            }
+        }
+        state("Sony LiveView readiness polls complete; requesting virtual JPEG object.");
+        boolean objectInfoNeeded = true;
+        while (!closed && liveViewEnabled) {
+            // Sony PTP2 exposes LiveView as a virtual object rather
+            // than a UVC stream. GetObjectInfo returns the object
+            // metadata, then GetObject carries the JPEG-containing
+            // data container across multiple USB bulk transfers.
+            // No sleep here: the camera answers each transaction as
+            // fast as it can, so the frame rate is camera-governed
+            // instead of capped at 20 fps by a 50 ms host sleep.
+            if (objectInfoNeeded) {
+                sendCommand(PTP_OC_GET_OBJECT_INFO, SONY_LIVE_VIEW_OBJECT);
+                readUntilResponse("LiveView GetObjectInfo");
+            }
+            sendCommand(PTP_OC_GET_OBJECT, SONY_LIVE_VIEW_OBJECT);
+            int getObjectResult = readUntilResponse("LiveView GetObject");
+            objectInfoNeeded = !skipObjectInfo || getObjectResult != 0x2001;
+            if (!SKIP_INTERFRAME_STATUS_POLL) {
+                sendCommand(SONY_GET_ALL_EXT_DEVICE_INFO);
+                readUntilResponse("Sony LiveView readiness poll");
+            }
+        }
+    }
+
+    /** Tears down and rebuilds the whole USB session after a hard stream failure. */
+    private void restartSession() throws IOException {
+        Log.i(TAG, "Restarting USB/PTP session");
+        synchronized (this) {
+            if (connection != null) {
+                connection.close();
+                connection = null;
+            }
+        }
+        ready = false;
+        resetStreamState();
+        transactionId = 0;
+        openUsb();
+        handshake();
+        ready = true;
+    }
+
+    /** Drops any partially received PTP bytes so the next attempt starts clean. */
+    private void resetStreamState() {
+        incoming = new byte[0];
+        incomingLength = 0;
     }
 
     /**
@@ -227,6 +334,14 @@ public final class PtpUsbCamera implements AutoCloseable {
      */
     public void stopLiveView() {
         liveViewEnabled = false;
+    }
+
+    /**
+     * Enables skipping GetObjectInfo after the first successful frame.
+     * Call before {@link #requestLiveView()}.
+     */
+    public void setSkipObjectInfo(boolean enabled) {
+        skipObjectInfo = enabled;
     }
 
     private void openUsb() throws IOException {
@@ -288,11 +403,15 @@ public final class PtpUsbCamera implements AutoCloseable {
      */
     private void startEventReader() {
         Thread events = new Thread(() -> {
+            // Bind to the connection that was current when this reader was
+            // created, so a session restart closes the old reader and a new
+            // reader starts for the new connection.
+            final UsbDeviceConnection eventConnection = connection;
             byte[] buffer = new byte[64];
             int silentReads = 0;
-            while (!closed && connection != null) {
+            while (!closed && eventConnection != null) {
                 try {
-                    int count = connection.bulkTransfer(interruptIn, buffer, buffer.length, 500);
+                    int count = eventConnection.bulkTransfer(interruptIn, buffer, buffer.length, 500);
                     if (count > 0) {
                         Log.d(TAG, "Sony PTP event (" + endpointDescription(interruptIn) +
                                 "): " + hex(buffer, 0, count));
@@ -340,10 +459,10 @@ public final class PtpUsbCamera implements AutoCloseable {
             throw new IOException("PTP command write failed: " + written +
                     " (OUT " + endpointDescription(bulkOut) + ")");
         }
-        state(String.format("PTP command 0x%04X sent", code));
+        Log.i(TAG, String.format("PTP command 0x%04X sent", code));
     }
 
-    private synchronized void sendDataCommand(int code, byte[] data, String operation,
+    private synchronized int sendDataCommand(int code, byte[] data, String operation,
             int... params) throws IOException {
         int commandLength = 12 + params.length * 4;
         ByteBuffer command = ByteBuffer.allocate(commandLength).order(ByteOrder.LITTLE_ENDIAN);
@@ -370,14 +489,15 @@ public final class PtpUsbCamera implements AutoCloseable {
                 code, currentTransaction, dataLength));
         writeBulk(dataPacket.array(), "data");
         state(String.format("PTP data operation 0x%04X sent", code));
-        readUntilResponse(operation);
+        return readUntilResponse(operation);
     }
 
     private void writeBulk(byte[] bytes, String phase) throws IOException {
         int written = connection.bulkTransfer(bulkOut, bytes, bytes.length, USB_TRANSFER_TIMEOUT_MS);
         if (written != bytes.length) {
             throw new IOException("PTP " + phase + " write failed: " + written +
-                    " (OUT " + endpointDescription(bulkOut) + ")");
+                    " (OUT " + endpointDescription(bulkOut) +
+                    "; the camera USB pipe is halted - power-cycle the camera (off and on) and reconnect)");
         }
     }
 
@@ -391,7 +511,11 @@ public final class PtpUsbCamera implements AutoCloseable {
             if (container.type == PTP_RESPONSE) {
                 Log.i(TAG, String.format("PTP response operation=%s code=0x%04X transaction=%d",
                         operation, container.code, container.transaction));
-                state(String.format("%s response: 0x%04X", operation, container.code));
+                // Every stream frame produces several responses; only surface
+                // them on screen outside streaming to avoid flooding the UI.
+                if (!streaming) {
+                    state(String.format("%s response: 0x%04X", operation, container.code));
+                }
                 return container.code;
             }
         }
@@ -432,9 +556,10 @@ public final class PtpUsbCamera implements AutoCloseable {
      */
     private void ensureIncoming(int needed) throws IOException {
         int failures = 0;
+        int timeoutMs = streaming ? STREAM_READ_TIMEOUT_MS : USB_TRANSFER_TIMEOUT_MS;
         while (incomingLength < needed && !closed) {
             int count = connection.bulkTransfer(bulkIn, readChunk, readChunk.length,
-                    USB_TRANSFER_TIMEOUT_MS);
+                    timeoutMs);
             if (count > 0) {
                 byte[] grown = new byte[incomingLength + count];
                 System.arraycopy(incoming, 0, grown, 0, incomingLength);
@@ -460,7 +585,8 @@ public final class PtpUsbCamera implements AutoCloseable {
                 if (failures >= USB_READ_RETRIES) {
                     throw new IOException("USB bulk read failed: " + count +
                             " (IN " + endpointDescription(bulkIn) +
-                            ", after " + failures + " attempts; camera may have left PC Remote mode)");
+                            ", after " + failures + " attempts; camera may have left PC Remote mode, or its USB pipe is " +
+                            "halted - power-cycle the camera (off and on) and reconnect)");
                 }
                 try {
                     Thread.sleep(100L);

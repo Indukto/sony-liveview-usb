@@ -111,3 +111,77 @@ The extracted Monitor+ AOT binary contains a different, more complete LiveView p
 - The receiver parses live-view data and reports `STREAMING frame received`; it can fall back to HTTP using `SetLiveViewEnable` and `LiveViewUrl` when SDIO streaming fails.
 
 This is confirmed evidence that Monitor+ has a separate adaptive stream layer, but the supplied Imaging Edge capture proves that the a6300 also exposes a working PTP2 virtual-object path. The Android prototype now prioritizes the directly captured Imaging Edge sequence. The Monitor+ `SDIO_Start`/`SDIO_ControlMonitoring` path remains a separate fallback if the captured virtual-object path does not produce frames on Android.
+
+## Reaching 30 fps (SDIO monitoring stream)
+
+The PTP2 virtual-object pull loop is camera-paced and typically lands in the
+10–15 fps range on the a6300; the supplied Imaging Edge capture itself only
+achieves ~10 fps. Monitor+'s 30 fps comes from Sony's newer SDIO **monitoring
+push stream**, confirmed by strings in `lib/arm64-v8a/libapp.so`:
+
+- `SDIO_Start` returns a `deliveryId` (`START OK deliveryId=`, `START rejected
+  deliveryId=`), then `SDIO_ControlMonitoring` runs the stream and the camera
+  pushes `SDIE_MonitoringEvent` containers.
+- The monitoring metadata block carries `Monitoring Binary Version`,
+  `Monitoring Transport Protocol`, `Monitoring Cipher Type / Key / IV`,
+  `Monitoring Delivery ID`, `Monitoring Delivering Status`, and supported
+  streaming formats; the cipher enum includes `AES_128_CBC/CTR` through
+  `AES_256_CBC/CTR`, and codecs `H264`, `MJPEG`, `JPEG`, `Mono` with frame
+  rates up to `FrameRate_30_00` and resolutions up to 4K.
+- On failure the app logs `), switching to STREAMING`, retries the start, and
+  can fall back to HTTP (`SetLiveViewEnable`, `LiveViewUrl`).
+
+The monitoring opcodes (`SDIO_Start`, `SDIO_ControlMonitoring`, the monitoring
+metadata read) are **not published** in the public Camera Remote Command SDK or
+any open-source project as of now, so replicating the 30 fps path requires
+capturing Monitor+'s own USB traffic on the a6300 (USBPcap) and matching the
+opcodes/parameters to this app. Until then the prototype keeps the certified
+PTP2 path and adds experiment levers:
+
+- **Skip GetObjectInfo** (checkbox, off by default): sends `GetObjectInfo`
+  only once, then `GetObject` alone while it keeps returning `0x2001` (one
+  fewer PTP round trip per frame). If a `GetObject` fails, `GetObjectInfo` is
+  re-issued to re-sync. This is the first experiment worth running.
+- **Frame diagnostics**: the FPS overlay shows received fps, consecutive
+  duplicates and the average frame interval (`FPS 11 · dup 0 · 91ms`). Stale
+  identical JPEGs are not decoded or redrawn. If `dup` stays high, the camera
+  is serving frames slower than the loop runs; if the interval stays ~85–90 ms
+  with the checkbox on, that is the camera's own frame-generation floor and
+  only the SDIO stream will raise it.
+
+**Do not send `0x9205` (SetExtDevicePropValue) to the a6300.** A property
+write there — even a documented property such as LiveView mode `0xD26A` — can
+STALL the camera's bulk OUT pipe at the USB level (bulk transfer returns -1 on
+OUT `0x02`), halting every later transaction. Android's public USB API cannot
+clear a halted endpoint, so recovery requires power-cycling the camera.
+
+For the cleanest measurement, keep the camera on JPEG-only (no RAW+JPEG),
+manual focus/exposure, no DRO/HDR, no face/eye detection, no image review and
+no picture effects, and compare the interval readout with the checkbox on/off.
+
+## Automatic recovery
+
+Transient live-view errors no longer require closing the app or power-cycling
+the camera:
+
+- **Short streaming timeouts**: during live view, a read that yields no data
+  for 3 s (instead of 15 s) is treated as a broken frame and triggers
+  recovery, so a camera hiccup surfaces in seconds, not a 45 s freeze.
+- **Tiered retries**: the first retry re-synchronizes the stream on the same
+  session; later retries tear down and rebuild the whole USB session
+  (re-open, re-claim, full handshake). Up to three retries run with backoff
+  before the app gives up.
+- **Recovery is visible**: the video page shows an amber `RECOVERING:` overlay
+  while retries run, and the stream stays up.
+- **Clean failure**: if the camera cannot be recovered (e.g. a genuinely
+  halted pipe), the app closes the session, returns to the connection page
+  with the Connect button enabled, and prints the power-cycle hint — the app
+  itself never needs to be killed. Power-cycling the camera is only required
+  for hardware-level pipe halts.
+- **Calmer per-frame logging**: per-frame responses are logged to logcat but
+  no longer pushed to the UI log during streaming, removing UI-thread load
+  that previously contributed to stutter.
+
+Note that the a6300's live-view frame rate itself varies with scene and
+exposure (a long exposure in a dark scene drops the frame rate), which is
+camera-side and independent of these host-side changes.
