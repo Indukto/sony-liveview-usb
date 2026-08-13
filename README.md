@@ -157,6 +157,10 @@ PTP2 path and adds experiment levers:
   client-side the same way). The histogram is sampled before peaking so the
   tint never skews it, and it costs under ~0.1 ms per frame on the decoder
   thread.
+- **Zebra exposure aid** (video page, below Hist): a **Zebra: Off/100%**
+  toggle overlays classic diagonal black/white stripes on every pixel at or
+  above JPEG white (luma ≥ 254). Like peaking it is computed on the decoder
+  thread and never writes to the camera.
 - **Frame diagnostics**: the FPS overlay shows received fps, consecutive
   duplicates and the average frame interval (`FPS 11 · dup 0 · 91ms`). Stale
   identical JPEGs are not decoded or redrawn. If `dup` stays high, the camera

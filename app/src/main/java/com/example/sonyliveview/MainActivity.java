@@ -112,6 +112,11 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     private boolean histogramEnabled;
     private Button histogramButton;
     private HistogramView histogramView;
+
+    // Zebra exposure aid: on = 100% level (JPEG white). Display-side only,
+    // like peaking and the histogram.
+    private boolean zebraEnabled;
+    private Button zebraButton;
     private final int[][] histogramBins = new int[3][HistogramView.BINS];
     private static final int HISTOGRAM_SAMPLE_WIDTH = 128;
 
@@ -278,6 +283,13 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         histParams.setMargins(dp(12), dp(112), 0, 0);
         page.addView(histogramButton, histParams);
 
+        zebraButton = makeOverlayButton("Zebra: Off");
+        zebraButton.setOnClickListener(v -> toggleZebra());
+        FrameLayout.LayoutParams zebraParams = new FrameLayout.LayoutParams(-2, -2);
+        zebraParams.gravity = Gravity.TOP | Gravity.START;
+        zebraParams.setMargins(dp(12), dp(162), 0, 0);
+        page.addView(zebraButton, zebraParams);
+
         histogramView = new HistogramView(this);
         histogramView.setVisibility(View.GONE);
         FrameLayout.LayoutParams histViewParams = new FrameLayout.LayoutParams(dp(150), dp(66));
@@ -396,6 +408,13 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         histogramButton.setTextColor(histogramEnabled ? COLOR_ACCENT : COLOR_TEXT);
         histogramView.setVisibility(histogramEnabled ? View.VISIBLE : View.GONE);
         appendStatus("Histogram " + (histogramEnabled ? "on" : "off"));
+    }
+
+    private void toggleZebra() {
+        zebraEnabled = !zebraEnabled;
+        zebraButton.setText(zebraEnabled ? "Zebra: 100%" : "Zebra: Off");
+        zebraButton.setTextColor(zebraEnabled ? COLOR_BUSY : COLOR_TEXT);
+        appendStatus("Zebra " + (zebraEnabled ? "on (100%)" : "off"));
     }
 
     private void showConnectionPage(int color, String label) {
@@ -666,6 +685,11 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
             // Runs on the decoder thread, which is also the only thread that
             // touches FocusPeaking's reused buffers - safe without locks.
             bitmap = FocusPeaking.apply(bitmap, FocusPeaking.COLORS[peakingIndex - 1]);
+        }
+        if (zebraEnabled) {
+            // Applied after peaking so the stripes stay visible on top of the
+            // edge tint. Same single-threaded buffer rules as FocusPeaking.
+            bitmap = Zebra.apply(bitmap);
         }
         final Bitmap shownBitmap = bitmap;
         runOnUiThread(() -> {
