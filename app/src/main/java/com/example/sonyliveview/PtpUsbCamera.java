@@ -45,8 +45,16 @@ public final class PtpUsbCamera implements AutoCloseable {
     // made of several 512-byte packets plus a short packet (e.g. the
     // 0x9209 D221 container is 512 + 512 + 228 bytes), so always read a
     // large 512-aligned chunk and parse containers out of the buffered
-    // stream, keeping the remainder for the next container.
-    private static final int USB_READ_CHUNK = 64 * 1024;
+    // stream, keeping the remainder for the next container. Sized above the
+    // largest captured frame container (~132 KB) so one GetObject JPEG arrives
+    // in a single read.
+    private static final int USB_READ_CHUNK = 256 * 1024;
+
+    // Experimental: the Imaging Edge capture polls 0x9209 once between every
+    // GetObject, so this defaults to keeping it. Setting it to true removes
+    // that transaction from the frame loop (one third fewer round trips per
+    // frame) for hardware testing; the camera may then serve stale frames.
+    private static final boolean SKIP_INTERFRAME_STATUS_POLL = false;
 
     // Sony PTP extension commands found in the Monitor+ binary and public PTP traces.
     private static final int SONY_SDIO_CONNECT = 0x9201;
@@ -187,13 +195,17 @@ public final class PtpUsbCamera implements AutoCloseable {
                     // than a UVC stream. GetObjectInfo returns the object
                     // metadata, then GetObject carries the JPEG-containing
                     // data container across multiple USB bulk transfers.
+                    // No sleep here: the camera answers each transaction as
+                    // fast as it can, so the frame rate is camera-governed
+                    // instead of capped at 20 fps by a 50 ms host sleep.
                     sendCommand(PTP_OC_GET_OBJECT_INFO, SONY_LIVE_VIEW_OBJECT);
                     readUntilResponse("LiveView GetObjectInfo");
                     sendCommand(PTP_OC_GET_OBJECT, SONY_LIVE_VIEW_OBJECT);
                     readUntilResponse("LiveView GetObject");
-                    sendCommand(SONY_GET_ALL_EXT_DEVICE_INFO);
-                    readUntilResponse("Sony LiveView readiness poll");
-                    Thread.sleep(50L);
+                    if (!SKIP_INTERFRAME_STATUS_POLL) {
+                        sendCommand(SONY_GET_ALL_EXT_DEVICE_INFO);
+                        readUntilResponse("Sony LiveView readiness poll");
+                    }
                 }
                 if (!closed && !liveViewEnabled) {
                     state("Sony LiveView stopped.");

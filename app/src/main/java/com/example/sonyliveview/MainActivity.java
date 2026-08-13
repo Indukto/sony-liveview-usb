@@ -29,6 +29,9 @@ import android.widget.ViewFlipper;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Two-page UI: a connection page with status, controls and a live log, and a
@@ -83,6 +86,12 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     private int fpsCount;
     private long fpsWindowStart;
     private String lastFrameInfo = "No frames yet";
+
+    // JPEG decode runs off the camera's read thread so decoding (10-30 ms per
+    // frame) never stalls the PTP transaction loop. Only the newest frame is
+    // decoded; stale frames are dropped instead of queued up.
+    private final ExecutorService decoderExecutor = Executors.newSingleThreadExecutor();
+    private final AtomicReference<byte[]> latestJpeg = new AtomicReference<>();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -451,6 +460,8 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
 
     @Override
     public void onFrame(byte[] jpeg) {
+        // Received-frame accounting runs here on the camera thread; it only
+        // does cheap counters plus a one-line log, never a JPEG decode.
         int currentFrame = ++frameCount;
         fpsCount++;
         long now = SystemClock.elapsedRealtime();
@@ -465,6 +476,14 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         if (currentFrame == 1 || currentFrame % 30 == 0) {
             Log.d(TAG, "JPEG frames received=" + currentFrame + " latestBytes=" + jpeg.length);
         }
+        latestJpeg.set(jpeg);
+        decoderExecutor.execute(this::decodeAndShow);
+    }
+
+    /** Runs on the decoder thread; decodes only the newest pending frame. */
+    private void decodeAndShow() {
+        byte[] jpeg = latestJpeg.getAndSet(null);
+        if (jpeg == null) return; // superseded by a newer decode task
         Bitmap bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
         if (bitmap == null) {
             Log.w(TAG, "JPEG decode failed bytes=" + jpeg.length);
@@ -472,7 +491,7 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         }
         final int width = bitmap.getWidth();
         final int height = bitmap.getHeight();
-        lastFrameInfo = "JPEG " + width + "×" + height + " · frame #" + currentFrame;
+        lastFrameInfo = "JPEG " + width + "×" + height + " · frame #" + frameCount;
         runOnUiThread(() -> {
             previewView.setImageBitmap(bitmap);
             startingView.setVisibility(View.GONE);
@@ -528,6 +547,7 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     protected void onDestroy() {
         if (camera != null) camera.close();
         if (usbReceiver != null) unregisterReceiver(usbReceiver);
+        decoderExecutor.shutdownNow();
         super.onDestroy();
     }
 }

@@ -9,7 +9,9 @@ A small native Android prototype for Sony a6300 USB/PTP LiveView.
 
 
 3. Grant USB access to the app.
-4. Press **Connect**, then **Start LiveView**.
+4. Press **Connect**. Once the PTP session is ready, LiveView starts
+   automatically and a full-screen video page takes over; press **Stop**
+   (or the back key) to return to the connection page with its live log.
 
 The app opens the Sony PTP USB interface, performs the a6300 sequence confirmed from the supplied Sony Imaging Edge USBPcap capture (`GetStorageIDs`, Sony SDIO negotiation, and the second `0x9202` refresh), polls `0x9209`, then requests Sony's virtual LiveView object (`0xFFFFC002`) with standard `GetObjectInfo`/`GetObject`. The `GetObject` data container can span multiple USB bulk transfers and contains the JPEG preview bytes, which the app extracts for display.
 
@@ -74,6 +76,27 @@ large enough to span multiple USB packets (`0x9201`/`0x9202` containers fit in
 one). The fix is the same one expo-sony-camera documents for this symptom:
 read complete 512-aligned USB packets, buffer the remainder, and parse
 containers out of that buffer instead of issuing short header reads.
+
+## Performance notes
+
+Measured from the capture (SOF0 marker `FF C0 00 11 08 02 A8 04 00`):
+
+- The a6300 delivers **1024×680 baseline JPEG** frames, 105–132 KB each, as the
+  `GetObject(0xFFFFC002)` data container. The app renders them losslessly
+  (`FIT_CENTER`, no `inSampleSize`), so delivered resolution equals displayed
+  resolution; there is no app-side size limit.
+- Imaging Edge paces roughly 100 ms per frame cycle (~10 fps) with host-side
+  sleeps: ~25–30 ms between the `0x9209` response and `GetObjectInfo`, ~15 ms
+  before `GetObject`, ~60 ms before the next poll. The USB transfers themselves
+  only take 2–8 ms each.
+- The prototype therefore removed the 50 ms per-frame sleep that capped the
+  loop at 20 fps, moved JPEG decode off the camera's single read thread (a
+  decode can take 10–30 ms and previously stalled the transaction loop), and
+  enlarged the bulk read chunk to 256 KB so the largest captured frame
+  container arrives in one read. The camera governs the real frame rate; the
+  `SKIP_INTERFRAME_STATUS_POLL` flag in `PtpUsbCamera` is an experiment lever
+  that removes one third of the per-frame round trips if the camera tolerates
+  it.
 
 ## Monitor+ binary findings
 
