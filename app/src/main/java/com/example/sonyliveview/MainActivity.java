@@ -59,6 +59,8 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     private static final int COLOR_OK = 0xFF69DB7C;
     private static final int COLOR_BUSY = 0xFFFFD43B;
     private static final int COLOR_ERR = 0xFFFF6B6B;
+    private static final int COLOR_SCOPE = 0xFFD0A9F5;
+    private static final int COLOR_REC = 0xFFE53935;
 
     private static final int PAGE_CONNECTION = 0;
     private static final int PAGE_VIDEO = 1;
@@ -134,6 +136,23 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     private Button desqueezeButton;
     private static final float[] DESQUEEZE_FACTORS = {1.33f, 1.5f, 2f};
     private static final String[] DESQUEEZE_LABELS = {"1.33x", "1.5x", "2x"};
+
+    // Camera recording state: the a6300 reports movie recording via the Sony
+    // 0xD21D property (Movie Recording State) in the same 0x9209 block as the
+    // battery. While the camera records, a red frame borders the whole stage
+    // and a red REC label shows top-center. Display-side only - recording
+    // starts/stops on the camera itself.
+    private TextView recLabel;
+    private View recBorder;
+
+    // Cinescope framing mask: 0 = off, otherwise an index into SCOPE_ASPECTS.
+    // Display-side only: darkens everything outside the cinematic frame and
+    // outlines it, like the aspect-ratio masks on Atomos/SmallHD monitors.
+    private int scopeIndex;
+    private Button scopeButton;
+    private ScopeOverlayView scopeView;
+    private static final float[] SCOPE_ASPECTS = {2.39f, 1.85f};
+    private static final String[] SCOPE_LABELS = {"2.39", "1.85"};
 
     private final int[][] histogramBins = new int[3][HistogramView.BINS];
     private static final int HISTOGRAM_SAMPLE_WIDTH = 128;
@@ -282,6 +301,11 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         gridView.setVisibility(View.GONE);
         page.addView(gridView, new FrameLayout.LayoutParams(-1, -1));
 
+        // Cinescope mask over the frame; hidden until the Scope tool is on.
+        scopeView = new ScopeOverlayView(this);
+        scopeView.setVisibility(View.GONE);
+        page.addView(scopeView, new FrameLayout.LayoutParams(-1, -1));
+
         // Top-left: the only chrome up here is Stop (back to the connection
         // page). Everything else stays out of the frame.
         Button backButton = makeOverlayButton("Stop");
@@ -293,6 +317,26 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         backParams.gravity = Gravity.TOP | Gravity.START;
         backParams.setMargins(dp(12), dp(12), 0, 0);
         page.addView(backButton, backParams);
+
+        // Top-center: the camera-recording indicator. A label, not a button -
+        // movie recording starts/stops on the camera (Sony 0xD21D).
+        recLabel = new TextView(this);
+        recLabel.setText("● REC");
+        recLabel.setTextColor(COLOR_REC);
+        recLabel.setTextSize(13);
+        recLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        recLabel.setGravity(Gravity.CENTER);
+        recLabel.setPadding(dp(12), dp(4), dp(12), dp(4));
+        recLabel.setVisibility(View.GONE);
+        GradientDrawable recBackground = new GradientDrawable();
+        recBackground.setColor(0xCC1A0505);
+        recBackground.setStroke(dp(1), COLOR_REC);
+        recBackground.setCornerRadius(dp(9));
+        recLabel.setBackground(recBackground);
+        FrameLayout.LayoutParams recParams = new FrameLayout.LayoutParams(-2, -2);
+        recParams.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+        recParams.setMargins(0, dp(12), 0, 0);
+        page.addView(recLabel, recParams);
 
         // Top-right: one translucent panel with the filming readouts instead of
         // four loose labels floating over the frame.
@@ -362,6 +406,10 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         desqueezeButton.setOnClickListener(v -> cycleDesqueeze());
         tools.addView(desqueezeButton, lp(-2, -2, 0, 0, 0, dp(6), 0));
 
+        scopeButton = makeOverlayButton("Scope: Off");
+        scopeButton.setOnClickListener(v -> cycleScope());
+        tools.addView(scopeButton, lp(-2, -2, 0, 0, 0, dp(6), 0));
+
         histogramButton = makeOverlayButton("Hist: Off");
         histogramButton.setOnClickListener(v -> toggleHistogram());
         tools.addView(histogramButton, lp(-2, -2, 0, 0, 0, 0, 0));
@@ -377,6 +425,16 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         histViewParams.gravity = Gravity.BOTTOM | Gravity.START;
         histViewParams.setMargins(dp(12), 0, 0, dp(12));
         page.addView(histogramView, histViewParams);
+
+        // Added last so it draws on top of everything: the recording frame. A
+        // transparent view with a thick red stroke around the screen edges.
+        recBorder = new View(this);
+        recBorder.setVisibility(View.GONE);
+        GradientDrawable recBorderBackground = new GradientDrawable();
+        recBorderBackground.setColor(0x00000000);
+        recBorderBackground.setStroke(dp(4), COLOR_REC);
+        recBorder.setBackground(recBorderBackground);
+        page.addView(recBorder, new FrameLayout.LayoutParams(-1, -1));
 
         videoStatusLabel = new TextView(this);
         videoStatusLabel.setTextColor(COLOR_BUSY);
@@ -496,6 +554,17 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         styleToggle(desqueezeButton, desqueezeIndex != 0, COLOR_OK);
         appendStatus("Anamorphic desqueeze " +
                 (desqueezeIndex == 0 ? "off" : "on (" + DESQUEEZE_LABELS[desqueezeIndex - 1] + ")"));
+    }
+
+    private void cycleScope() {
+        scopeIndex = (scopeIndex + 1) % (SCOPE_ASPECTS.length + 1);
+        String label = scopeIndex == 0 ? "Scope: Off" : "Scope: " + SCOPE_LABELS[scopeIndex - 1];
+        scopeButton.setText(label);
+        styleToggle(scopeButton, scopeIndex != 0, COLOR_SCOPE);
+        scopeView.setScopeAspect(scopeIndex > 0 ? SCOPE_ASPECTS[scopeIndex - 1] : 0f);
+        appendStatus("Cinescope " + (scopeIndex == 0
+                ? "off"
+                : "on (" + SCOPE_LABELS[scopeIndex - 1] + ":1)"));
     }
 
     private void showConnectionPage(int color, String label) {
@@ -824,12 +893,23 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
             startingView.setVisibility(View.GONE);
             videoStatusLabel.setVisibility(View.GONE);
             videoInfoLabel.setText(lastFrameInfo);
-            // Grid follows the displayed (desqueezed) image rectangle.
-            gridView.setImageAspect(Math.round(width * desqueezeFactor), height);
+            // Grid and scope follow the displayed (desqueezed) image rectangle.
+            int shownWidth = Math.round(width * desqueezeFactor);
+            gridView.setImageAspect(shownWidth, height);
+            scopeView.setImageAspect(shownWidth, height);
             if (showAspectTip) {
                 appendStatus("Tip: camera Aspect Ratio is 16:9 (1024×574). " +
                         "Set it to 3:2 on the camera for a taller 1024×680 live view.");
             }
+        });
+    }
+
+    @Override
+    public void onRecording(boolean recording) {
+        runOnUiThread(() -> {
+            recBorder.setVisibility(recording ? View.VISIBLE : View.GONE);
+            recLabel.setVisibility(recording ? View.VISIBLE : View.GONE);
+            appendStatus(recording ? "Camera recording started" : "Camera recording stopped");
         });
     }
 
@@ -851,6 +931,8 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
             videoBatteryLabel.setVisibility(View.GONE);
             videoExposureLabel.setText("");
             videoExposureLabel.setVisibility(View.GONE);
+            recBorder.setVisibility(View.GONE);
+            recLabel.setVisibility(View.GONE);
         });
     }
 

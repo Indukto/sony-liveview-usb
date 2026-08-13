@@ -27,6 +27,10 @@ public final class PtpUsbCamera implements AutoCloseable {
         // Human-readable exposure line from the 0x9209 property block, e.g.
         // "1/5s · f/4.0 · ISO AUTO". Fired only when it changes.
         void onExposure(String label);
+        // Camera movie recording state (Sony 0xD21D in the 0x9209 block).
+        // Fired only on transitions, e.g. when the user starts/stops movie
+        // recording on the camera.
+        void onRecording(boolean recording);
         void onClosed();
     }
 
@@ -94,6 +98,7 @@ public final class PtpUsbCamera implements AutoCloseable {
     private static final int SONY_SHUTTER_SPEED = 0xD20D;
     private static final int SONY_FNUMBER = 0x5007;
     private static final int SONY_ISO = 0xD21E;
+    private static final int SONY_MOVIE_RECORDING = 0xD21D;
     private static final int SONY_EXPOSURE_COMP = 0x5010;
     // NOTE: Sony's SetExtDevicePropValue (0x9205) is NOT sent to the a6300.
     // A property write there (even a documented one such as LiveView mode
@@ -123,6 +128,9 @@ public final class PtpUsbCamera implements AutoCloseable {
     // rule as the battery: the ~10 Hz readiness polls carry the same
     // values (the camera only updates them when the exposure changes).
     private volatile String lastExposureLabel;
+    // Camera movie recording state (Sony 0xD21D). Only transitions notify the
+    // listener, so the ~10 Hz readiness polls do not spam the UI thread.
+    private volatile boolean lastRecordingState;
     private UsbDeviceConnection connection;
     private UsbEndpoint bulkIn;
     private UsbEndpoint bulkOut;
@@ -672,6 +680,7 @@ public final class PtpUsbCamera implements AutoCloseable {
         Integer shutter = null;
         Integer aperture = null;
         Integer iso = null;
+        Boolean recording = null;
         for (int record = 0; record < count && i + 10 <= container.length; record++) {
             int code = u16(container, i);
             int datatype = u16(container, i + 2);
@@ -706,6 +715,10 @@ public final class PtpUsbCamera implements AutoCloseable {
                     case SONY_ISO:
                         iso = (int) value;
                         break;
+                    case SONY_MOVIE_RECORDING:
+                        // UINT8: 0 = stopped, non-zero = recording.
+                        recording = value != 0;
+                        break;
                     default:
                         break;
                 }
@@ -735,6 +748,12 @@ public final class PtpUsbCamera implements AutoCloseable {
             lastExposureLabel = exposure;
             Log.i(TAG, "Sony exposure: " + exposure);
             listener.onExposure(exposure);
+        }
+        if (recording != null && recording != lastRecordingState) {
+            lastRecordingState = recording;
+            Log.i(TAG, "Sony movie recording: " + (recording ? "started" : "stopped") +
+                    " (property 0xD21D)");
+            listener.onRecording(recording);
         }
     }
 

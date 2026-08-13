@@ -179,6 +179,21 @@ battery, frame info) and a compact tool row along the bottom-right:
   the decoder thread, applied after peaking/zebra); the grid and the readout
   panel track the widened image rectangle. The live view itself stays squeezed
   until you toggle it on.
+- **Cinescope mask**: a **Scope: Off/2.39/1.85** toggle darkens everything
+  outside the chosen cinematic frame and outlines it with a thin white border,
+  like the aspect-ratio masks on Atomos/SmallHD monitors. The frame is the
+  largest scope-aspect rectangle inside the fitted (and desqueezed) image, so
+  it hugs the picture, not the screen letterbox bars. Display-side only.
+- **Camera recording detection**: the camera's own movie recording state is
+  read from the Sony `0xD21D` property (Movie Recording State) in the same
+  `0x9209` block as the battery - the capture shows it present in every
+  container (`0` = stopped). Start or stop movie recording on the camera and
+  the stage reacts within one poll cycle (~0.1 s): a red frame borders the
+  whole screen and a **● REC** label appears top-center while recording. No
+  app-side record button - recording always starts/stops on the camera.
+  Note: on the a6300, movie recording may be disabled while the USB LUN is set
+  to PC Remote; if the camera cannot start recording, the property stays `0`
+  and the frame stays off.
 - **Live RGB histogram**: a **Hist: Off/On** toggle shows an Imaging
   Edge-style R/G/B histogram at the bottom-left, generated in-app from a
   128px-wide sample of the displayed frame (the camera sends no histogram
