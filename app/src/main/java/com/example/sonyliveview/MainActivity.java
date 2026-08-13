@@ -8,6 +8,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Matrix;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.hardware.usb.UsbDevice;
@@ -125,6 +126,15 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
 
     // Rule-of-thirds grid overlay (display-side only).
     private boolean gridEnabled;
+
+    // Anamorphic desqueeze: 0 = off, otherwise an index into DESQUEEZE_FACTORS.
+    // Display-side only: the decoded frame is stretched horizontally by the
+    // squeeze factor so an anamorphic lens's squeezed image displays un-squeezed.
+    private int desqueezeIndex;
+    private Button desqueezeButton;
+    private static final float[] DESQUEEZE_FACTORS = {1.33f, 1.5f, 2f};
+    private static final String[] DESQUEEZE_LABELS = {"1.33x", "1.5x", "2x"};
+
     private final int[][] histogramBins = new int[3][HistogramView.BINS];
     private static final int HISTOGRAM_SAMPLE_WIDTH = 128;
 
@@ -348,6 +358,10 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         gridButton.setOnClickListener(v -> toggleGrid());
         tools.addView(gridButton, lp(-2, -2, 0, 0, 0, dp(6), 0));
 
+        desqueezeButton = makeOverlayButton("DeSq: Off");
+        desqueezeButton.setOnClickListener(v -> cycleDesqueeze());
+        tools.addView(desqueezeButton, lp(-2, -2, 0, 0, 0, dp(6), 0));
+
         histogramButton = makeOverlayButton("Hist: Off");
         histogramButton.setOnClickListener(v -> toggleHistogram());
         tools.addView(histogramButton, lp(-2, -2, 0, 0, 0, 0, 0));
@@ -471,6 +485,17 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         styleToggle(gridButton, gridEnabled, COLOR_ACCENT);
         gridView.setThirds(gridEnabled);
         appendStatus("Thirds grid " + (gridEnabled ? "on" : "off"));
+    }
+
+    private void cycleDesqueeze() {
+        desqueezeIndex = (desqueezeIndex + 1) % (DESQUEEZE_FACTORS.length + 1);
+        String label = desqueezeIndex == 0
+                ? "DeSq: Off"
+                : "DeSq: " + DESQUEEZE_LABELS[desqueezeIndex - 1];
+        desqueezeButton.setText(label);
+        styleToggle(desqueezeButton, desqueezeIndex != 0, COLOR_OK);
+        appendStatus("Anamorphic desqueeze " +
+                (desqueezeIndex == 0 ? "off" : "on (" + DESQUEEZE_LABELS[desqueezeIndex - 1] + ")"));
     }
 
     private void showConnectionPage(int color, String label) {
@@ -764,6 +789,8 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         final boolean showAspectTip = !aspectTipShown && width == 1024 && height == 574;
         if (showAspectTip) aspectTipShown = true;
         lastFrameInfo = "JPEG " + width + "×" + height + " · frame #" + frameCount;
+        final int desqueeze = desqueezeIndex;
+        final float desqueezeFactor = desqueeze > 0 ? DESQUEEZE_FACTORS[desqueeze - 1] : 1f;
         // Histogram comes from the untouched frame (peaking would skew it).
         // Sampling a 128px-wide copy keeps it under ~0.1 ms per frame.
         if (histogramEnabled) {
@@ -780,13 +807,25 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
             // edge tint. Same single-threaded buffer rules as FocusPeaking.
             bitmap = Zebra.apply(bitmap);
         }
+        if (desqueezeFactor > 1f) {
+            // Last, because it is a geometric stretch rather than a pixel
+            // filter: widens the squeezed anamorphic frame back to its true
+            // aspect (1.33x / 1.5x / 2x). The histogram above stays untouched.
+            Matrix matrix = new Matrix();
+            matrix.postScale(desqueezeFactor, 1f);
+            Bitmap desqueezed = Bitmap.createBitmap(bitmap, 0, 0,
+                    bitmap.getWidth(), bitmap.getHeight(), matrix, true);
+            if (desqueezed != bitmap) bitmap.recycle();
+            bitmap = desqueezed;
+        }
         final Bitmap shownBitmap = bitmap;
         runOnUiThread(() -> {
             previewView.setImageBitmap(shownBitmap);
             startingView.setVisibility(View.GONE);
             videoStatusLabel.setVisibility(View.GONE);
             videoInfoLabel.setText(lastFrameInfo);
-            gridView.setImageAspect(width, height);
+            // Grid follows the displayed (desqueezed) image rectangle.
+            gridView.setImageAspect(Math.round(width * desqueezeFactor), height);
             if (showAspectTip) {
                 appendStatus("Tip: camera Aspect Ratio is 16:9 (1024×574). " +
                         "Set it to 3:2 on the camera for a taller 1024×680 live view.");

@@ -173,6 +173,12 @@ battery, frame info) and a compact tool row along the bottom-right:
   plus a small center reticle, fitted to the actual image rectangle (the
   preview is `FIT_CENTER`, so the lines follow the frame, not the screen's
   letterbox bars). Purely a drawing overlay.
+- **Anamorphic desqueeze**: a **DeSq: Off/1.33x/1.5x/2x** toggle stretches the
+  decoded frame horizontally by the squeeze factor, so footage shot through an
+  anamorphic lens displays un-squeezed. Display-side only (a `Matrix` scale on
+  the decoder thread, applied after peaking/zebra); the grid and the readout
+  panel track the widened image rectangle. The live view itself stays squeezed
+  until you toggle it on.
 - **Live RGB histogram**: a **Hist: Off/On** toggle shows an Imaging
   Edge-style R/G/B histogram at the bottom-left, generated in-app from a
   128px-wide sample of the displayed frame (the camera sends no histogram
