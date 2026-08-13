@@ -146,6 +146,13 @@ PTP2 path and adds experiment levers:
   highlighter that tints in-focus detail Sony-style — cycle **Peak: Off → Red
   → Yellow → White**. It is computed on the decoder thread and never writes
   to the camera, so it cannot trigger the a6300's pipe stall.
+- **Live RGB histogram** (video page, below Peak): a **Hist: Off/On** toggle
+  shows an Imaging Edge-style R/G/B histogram, generated in-app from a
+  128px-wide sample of the displayed frame (the camera sends no histogram
+  data on the PTP live view path; Imaging Edge computes its overlay
+  client-side the same way). The histogram is sampled before peaking so the
+  tint never skews it, and it costs under ~0.1 ms per frame on the decoder
+  thread.
 - **Frame diagnostics**: the FPS overlay shows received fps, consecutive
   duplicates and the average frame interval (`FPS 11 · dup 0 · 91ms`). Stale
   identical JPEGs are not decoded or redrawn. If `dup` stays high, the camera

@@ -99,6 +99,15 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     private int peakingIndex;
     private Button peakingButton;
 
+    // Live RGB histogram, computed in-app from the displayed frame (Imaging
+    // Edge does the same host-side; the camera sends no histogram data on the
+    // PTP live view path). Computed on the decoder thread when enabled.
+    private boolean histogramEnabled;
+    private Button histogramButton;
+    private HistogramView histogramView;
+    private final int[][] histogramBins = new int[3][HistogramView.BINS];
+    private static final int HISTOGRAM_SAMPLE_WIDTH = 128;
+
     // JPEG decode runs off the camera's read thread so decoding (10-30 ms per
     // frame) never stalls the PTP transaction loop. Only the newest frame is
     // decoded; stale frames are dropped instead of queued up.
@@ -249,6 +258,20 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         peakParams.setMargins(dp(12), dp(62), 0, 0);
         page.addView(peakingButton, peakParams);
 
+        histogramButton = makeOverlayButton("Hist: Off");
+        histogramButton.setOnClickListener(v -> toggleHistogram());
+        FrameLayout.LayoutParams histParams = new FrameLayout.LayoutParams(-2, -2);
+        histParams.gravity = Gravity.TOP | Gravity.START;
+        histParams.setMargins(dp(12), dp(112), 0, 0);
+        page.addView(histogramButton, histParams);
+
+        histogramView = new HistogramView(this);
+        histogramView.setVisibility(View.GONE);
+        FrameLayout.LayoutParams histViewParams = new FrameLayout.LayoutParams(dp(150), dp(66));
+        histViewParams.gravity = Gravity.BOTTOM | Gravity.START;
+        histViewParams.setMargins(dp(12), 0, 0, dp(12));
+        page.addView(histogramView, histViewParams);
+
         videoFpsLabel = new TextView(this);
         videoFpsLabel.setText("FPS 0");
         videoFpsLabel.setTextColor(COLOR_TEXT);
@@ -343,6 +366,14 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         peakingButton.setText(label);
         peakingButton.setTextColor(color);
         appendStatus("Focus peaking " + (peakingIndex == 0 ? "off" : "on (" + label.substring(6) + ")"));
+    }
+
+    private void toggleHistogram() {
+        histogramEnabled = !histogramEnabled;
+        histogramButton.setText(histogramEnabled ? "Hist: On" : "Hist: Off");
+        histogramButton.setTextColor(histogramEnabled ? COLOR_ACCENT : COLOR_TEXT);
+        histogramView.setVisibility(histogramEnabled ? View.VISIBLE : View.GONE);
+        appendStatus("Histogram " + (histogramEnabled ? "on" : "off"));
     }
 
     private void showConnectionPage(int color, String label) {
@@ -561,6 +592,24 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     }
 
     /** Runs on the decoder thread; decodes only the newest pending frame. */
+    private void computeHistogram(Bitmap bitmap, int[][] bins) {
+        int width = bitmap.getWidth();
+        int height = bitmap.getHeight();
+        int sampleWidth = Math.min(HISTOGRAM_SAMPLE_WIDTH, width);
+        int sampleHeight = Math.max(1, Math.round(height * sampleWidth / (float) width));
+        Bitmap small = Bitmap.createScaledBitmap(bitmap, sampleWidth, sampleHeight, true);
+        int[] pixels = new int[sampleWidth * sampleHeight];
+        small.getPixels(pixels, 0, sampleWidth, 0, 0, sampleWidth, sampleHeight);
+        if (small != bitmap) small.recycle();
+        for (int i = 0; i < 3; i++) Arrays.fill(bins[i], 0);
+        for (int p : pixels) {
+            bins[0][((p >>> 16) & 0xFF) * HistogramView.BINS / 256]++;
+            bins[1][((p >>> 8) & 0xFF) * HistogramView.BINS / 256]++;
+            bins[2][(p & 0xFF) * HistogramView.BINS / 256]++;
+        }
+    }
+
+    /** Runs on the decoder thread; decodes only the newest pending frame. */
     private void decodeAndShow() {
         byte[] jpeg = latestJpeg.getAndSet(null);
         if (jpeg == null) return; // superseded by a newer decode task
@@ -574,6 +623,12 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         final boolean showAspectTip = !aspectTipShown && width == 1024 && height == 574;
         if (showAspectTip) aspectTipShown = true;
         lastFrameInfo = "JPEG " + width + "×" + height + " · frame #" + frameCount;
+        // Histogram comes from the untouched frame (peaking would skew it).
+        // Sampling a 128px-wide copy keeps it under ~0.1 ms per frame.
+        if (histogramEnabled) {
+            computeHistogram(bitmap, histogramBins);
+            histogramView.setHistogram(histogramBins[0], histogramBins[1], histogramBins[2]);
+        }
         if (peakingIndex > 0) {
             // Runs on the decoder thread, which is also the only thread that
             // touches FocusPeaking's reused buffers - safe without locks.
