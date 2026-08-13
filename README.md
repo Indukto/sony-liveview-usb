@@ -62,9 +62,20 @@ The supplied capture has now replaced the earlier speculative `0x9251`/D221 plan
 9. Repeated `GetObjectInfo(0xFFFFC002)` followed by `GetObject(0xFFFFC002)`.
 10. The `GetObject` data container is multi-transfer and contains JPEG bytes beginning with `FF D8`; the capture contains 99 JPEG bulk transfers.
 
-### Battery level (`0x9209` → `0xD218`)
+### Battery level and exposure (`0x9209` property block)
 
-Every `0x9209` data container carries the full Sony device-property block, and it includes property **`0xD218` (Battery Level, INT8 percent)**. The capture was checked: all **110** `0x9209` responses contain `18 D2 01 00 00 02 FF 0E 01 FF` → current value `0x0E` = **14%**, over the 9.44 s polling span. The app parses this record out of each `0x9209` data container (scan for `0xD218` + datatype `0x0001` + a known form byte) and shows `BATTERY n%` on the connection page and the video overlay; the listener fires only when the value changes. No extra transaction is needed — the readiness polls already fetch it.
+Every `0x9209` data container carries the full Sony device-property block, and it includes property **`0xD218` (Battery Level, INT8 percent)**. The capture was checked: all **110** `0x9209` responses contain `18 D2 01 00 00 02 FF 0E 01 FF` → current value `0x0E` = **14%**, over the 9.44 s polling span. The app walks the whole block (u64 record count + one record per property, in alpha-fairy's layout) and shows `BATTERY n%` on the connection page and the video overlay; the listener fires only when the value changes. No extra transaction is needed — the readiness polls already fetch it.
+
+The same block carries the live exposure settings, which the video overlay shows as a line like `1/5s · f/4.0 · ISO AUTO`:
+
+| Property | Code | Type | Encoding (from the capture) |
+| -------- | ---- | ---- | --------------------------- |
+| Shutter Speed | `0xD20D` | UINT32 | seconds as `(numerator<<16)\|denominator` → `0x00010005` = **1/5 s** |
+| F-Number | `0x5007` | UINT16 | f-number × 100 → `400` = **f/4.0** |
+| ISO | `0xD21E` | UINT32 | literal; `0xFFFFFF` = **AUTO** |
+| Exposure Comp | `0x5010` | INT16 | EV × 1000 → `0` = +0.0 EV (logged only) |
+
+Value encodings were confirmed against the camera's own property enum list in the capture (ISO lists 25…409600 plus the `0xFFFFFF` AUTO sentinel) and against alpha-fairy, which sends shutter as `int16[] {denominator, numerator}` (i.e. low word = denominator, high word = numerator) and renders aperture as `value/100`. All three exposure fields read 0 until live view starts, so the overlay line stays hidden until the camera reports real values; in the capture they were constant while Imaging Edge streamed.
 
 The capture uses bulk OUT `0x02`, bulk IN `0x81`, and interrupt IN `0x83`. It does not contain the previously added `0x9205` priority or `0x5013` standby transactions, so the Android prototype now follows the observed Imaging Edge order instead of sending those unconfirmed commands. The host keeps a read pending on interrupt IN `0x83` from OpenSession onward; once the SDIO connect completes, the camera pushes a 16-byte PTP Event container (`0xC203`, parameter `0xD21D`) every few hundred milliseconds, so the app drains that endpoint too.
 
@@ -161,6 +172,11 @@ PTP2 path and adds experiment levers:
   toggle overlays classic diagonal black/white stripes on every pixel at or
   above JPEG white (luma ≥ 254). Like peaking it is computed on the decoder
   thread and never writes to the camera.
+- **Exposure readout** (video page, under the battery): the shutter speed,
+  f-number and ISO decoded from the same `0x9209` property block as the
+  battery (see the table above), e.g. `1/5s · f/4.0 · ISO AUTO`. It updates
+  live as the exposure changes and is logged to the status panel once per
+  change.
 - **Frame diagnostics**: the FPS overlay shows received fps, consecutive
   duplicates and the average frame interval (`FPS 11 · dup 0 · 91ms`). Stale
   identical JPEGs are not decoded or redrawn. If `dup` stays high, the camera

@@ -86,6 +86,7 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     private TextView videoFpsLabel;
     private TextView videoInfoLabel;
     private TextView videoBatteryLabel;
+    private TextView videoExposureLabel;
     private TextView videoStatusLabel;
 
     // Last battery percent reported by the camera via the Sony 0xD218
@@ -323,6 +324,15 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         batteryParams.gravity = Gravity.TOP | Gravity.END;
         batteryParams.setMargins(0, dp(66), dp(14), 0);
         page.addView(videoBatteryLabel, batteryParams);
+
+        videoExposureLabel = new TextView(this);
+        videoExposureLabel.setTextColor(COLOR_TEXT);
+        videoExposureLabel.setTextSize(12);
+        videoExposureLabel.setVisibility(View.GONE);
+        FrameLayout.LayoutParams exposureParams = new FrameLayout.LayoutParams(-2, -2);
+        exposureParams.gravity = Gravity.TOP | Gravity.END;
+        exposureParams.setMargins(0, dp(88), dp(14), 0);
+        page.addView(videoExposureLabel, exposureParams);
 
         videoStatusLabel = new TextView(this);
         videoStatusLabel.setTextColor(COLOR_BUSY);
@@ -611,6 +621,15 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     }
 
     @Override
+    public void onExposure(String label) {
+        runOnUiThread(() -> {
+            videoExposureLabel.setText(label);
+            videoExposureLabel.setVisibility(View.VISIBLE);
+            appendStatus("Exposure: " + label);
+        });
+    }
+
+    @Override
     public void onFrame(byte[] jpeg) {
         // Received-frame accounting runs here on the camera thread; it only
         // does cheap counters plus a one-line log, never a JPEG decode.
@@ -719,6 +738,8 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
             connectionBatteryLabel.setText("");
             videoBatteryLabel.setText("");
             videoBatteryLabel.setVisibility(View.GONE);
+            videoExposureLabel.setText("");
+            videoExposureLabel.setVisibility(View.GONE);
         });
     }
 

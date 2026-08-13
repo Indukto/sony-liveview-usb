@@ -12,6 +12,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -23,6 +24,9 @@ public final class PtpUsbCamera implements AutoCloseable {
         void onReady();
         void onFrame(byte[] jpeg);
         void onBattery(int percent);
+        // Human-readable exposure line from the 0x9209 property block, e.g.
+        // "1/5s · f/4.0 · ISO AUTO". Fired only when it changes.
+        void onExposure(String label);
         void onClosed();
     }
 
@@ -77,10 +81,20 @@ public final class PtpUsbCamera implements AutoCloseable {
     private static final int SONY_STANDBY_MODE = 0x00000001;
     private static final int SONY_LIVE_VIEW_STATUS = 0xD221;
     private static final int SONY_LIVE_VIEW_OBJECT = 0xFFFFC002;
-    // Sony device property returned inside the 0x9209 data container:
-    // 0xD218 = Battery Level (INT8 percent), confirmed against the Imaging
-    // Edge capture (0x0E = 14% in all 110 GetAllDevicePropData responses).
+    // Sony device properties returned inside the 0x9209 data container,
+    // all confirmed against the Imaging Edge capture: 0xD218 = Battery
+    // Level (INT8 percent, 0x0E = 14% in all 110 responses), 0xD20D =
+    // Shutter Speed (UINT32 seconds as (numerator<<16)|denominator),
+    // 0x5007 = F-Number (UINT16 f-number * 100), 0xD21E = ISO (UINT32
+    // literal, 0xFFFFFF = AUTO) and 0x5010 = Exposure Compensation
+    // (INT16 EV * 1000). The exposure values are 0 until live view
+    // starts; the capture shows 0x00010005 = 1/5 s, 400 = f/4.0 and
+    // 0xFFFFFF = AUTO once it is running.
     private static final int SONY_BATTERY_LEVEL = 0xD218;
+    private static final int SONY_SHUTTER_SPEED = 0xD20D;
+    private static final int SONY_FNUMBER = 0x5007;
+    private static final int SONY_ISO = 0xD21E;
+    private static final int SONY_EXPOSURE_COMP = 0x5010;
     // NOTE: Sony's SetExtDevicePropValue (0x9205) is NOT sent to the a6300.
     // A property write there (even a documented one such as LiveView mode
     // 0xD26A) can STALL the camera's bulk OUT pipe at the USB level (-1 on
@@ -105,6 +119,10 @@ public final class PtpUsbCamera implements AutoCloseable {
     // 0x9209 data container is parsed. The listener is only notified on
     // change, so the per-frame polls do not spam the UI thread.
     private volatile int lastBatteryPercent = -1;
+    // Last exposure line sent to the listener, or null. Same change-only
+    // rule as the battery: the ~10 Hz readiness polls carry the same
+    // values (the camera only updates them when the exposure changes).
+    private volatile String lastExposureLabel;
     private UsbDeviceConnection connection;
     private UsbEndpoint bulkIn;
     private UsbEndpoint bulkOut;
@@ -517,7 +535,7 @@ public final class PtpUsbCamera implements AutoCloseable {
             if (container.type == PTP_DATA) {
                 logDataContainer(container);
                 if (container.code == SONY_GET_ALL_EXT_DEVICE_INFO) {
-                    parseBattery(container.raw);
+                    parseProperties(container.raw);
                 }
             }
             if (container.type == PTP_RESPONSE) {
@@ -629,35 +647,178 @@ public final class PtpUsbCamera implements AutoCloseable {
     }
 
     /**
-     * Extracts Sony property 0xD218 (Battery Level) from a 0x9209 data
-     * container. The container payload is the full Sony device-property
-     * block; the battery record is:
+     * Parses the Sony device-property block inside a 0x9209 data container
+     * (the block is the container payload after the 12-byte PTP header). The
+     * block starts with a u64 record count, then one record per property;
+     * the layout matches alpha-fairy's decoder and the Imaging Edge capture:
      *
-     *     u16 code (0xD218), u16 datatype (0x0001 = INT8), u8 get/set,
-     *     u8 sony, u8 factory default, u8 current value, u8 form, ...
+     *     u16 code, u16 datatype, u8 get/set, u8 sony, u8 factory default,
+     *     <current value>, u8 form, form data (0x01 range: 3*dsz bytes,
+     *     0x02 enum: u16 count + count*dsz bytes, 0xFF/0x00: none)
      *
-     * e.g. 18 D2 01 00 00 02 FF 0E 01 FF -> value 0x0E = 14%. The record
-     * is scanned for rather than walked because the block mixes variable-
-     * length property records and the D221 status section; the code +
-     * datatype + form guard makes a false match essentially impossible.
+     * e.g. the shutter record 0D D2 06 00 00 02 05 00 01 00 ... -> current
+     * value 0x00010005 = 1/5 s, and the battery record 18 D2 01 00 00 02
+     * FF 0E 01 FF -> value 0x0E = 14%. Datatype sizes follow PTP (odd =
+     * signed): 1/2 = 1 byte, 3/4 = 2, 5/6 = 4, 7/8 = 8, 9/10 = 16, and
+     * 0xFFFF = UTF-16 string. All three exposure fields are 0 until the
+     * camera starts live view, so the UI only shows the line once they
+     * carry real values.
      */
-    private void parseBattery(byte[] container) {
-        for (int i = 12; i + 10 <= container.length; i++) {
-            if ((container[i] & 0xff) != 0x18 || (container[i + 1] & 0xff) != 0xD2) {
+    private void parseProperties(byte[] container) {
+        if (container.length < 20) return;
+        long count = u64(container, 12);
+        int i = 20;
+        Integer battery = null;
+        Integer shutter = null;
+        Integer aperture = null;
+        Integer iso = null;
+        for (int record = 0; record < count && i + 10 <= container.length; record++) {
+            int code = u16(container, i);
+            int datatype = u16(container, i + 2);
+            i += 4;
+            if (datatype == 0x0000 || code == 0x0000) {
+                i += 4; // opaque filler record; alpha-fairy skips it the same way
                 continue;
             }
-            int datatype = (container[i + 2] & 0xff) | ((container[i + 3] & 0xff) << 8);
-            if (datatype != 0x0001) continue;
-            int form = container[i + 8] & 0xff;
-            if (form != 0x01 && form != 0x02 && form != 0xFF) continue;
-            int percent = container[i + 7] & 0xff;
-            if (percent != lastBatteryPercent) {
-                lastBatteryPercent = percent;
-                Log.i(TAG, "Sony battery level: " + percent + "% (property 0xD218)");
-                listener.onBattery(percent);
+            i += 2; // get/set visibility byte + Sony byte
+            int dataSize = dataSize(datatype);
+            if (datatype == 0xFFFF) {
+                // UTF-16 string: u8 element count, then count * 2 bytes.
+                if (i >= container.length) break;
+                int elements = container[i++] & 0xff;
+                i += elements * 2;
+            } else if (dataSize > 0) {
+                if (i + dataSize > container.length) break;
+                i += dataSize; // factory default
+                if (i + dataSize > container.length) break;
+                long value = readValue(container, i, dataSize, datatype);
+                i += dataSize;
+                switch (code) {
+                    case SONY_BATTERY_LEVEL:
+                        if (value >= 0 && value <= 100) battery = (int) value;
+                        break;
+                    case SONY_SHUTTER_SPEED:
+                        shutter = (int) value;
+                        break;
+                    case SONY_FNUMBER:
+                        aperture = (int) value;
+                        break;
+                    case SONY_ISO:
+                        iso = (int) value;
+                        break;
+                    default:
+                        break;
+                }
+            } else {
+                break; // unknown datatype: cannot walk further safely
             }
-            return;
+            if (i >= container.length) break;
+            int form = container[i++] & 0xff;
+            if (form == 0x01) {
+                i += 3 * dataSize; // range: min, max, step
+            } else if (form == 0x02) {
+                if (i + 2 > container.length) break;
+                int elements = u16(container, i);
+                i += 2 + elements * dataSize; // enumeration
+            }
+            if (form != 0x01 && form != 0x02 && form != 0xFF && form != 0x00) {
+                break; // unknown form: cannot walk further safely
+            }
         }
+        if (battery != null && battery != lastBatteryPercent) {
+            lastBatteryPercent = battery;
+            Log.i(TAG, "Sony battery level: " + battery + "% (property 0xD218)");
+            listener.onBattery(battery);
+        }
+        String exposure = formatExposure(shutter, aperture, iso);
+        if (exposure != null && !exposure.equals(lastExposureLabel)) {
+            lastExposureLabel = exposure;
+            Log.i(TAG, "Sony exposure: " + exposure);
+            listener.onExposure(exposure);
+        }
+    }
+
+    /**
+     * Builds the exposure line from the raw property values. ShutterSpeed
+     * is seconds as (numerator<<16)|denominator (alpha-fairy's disabled
+     * cmd_ShutterSpeedSet sends int16[] {denominator, numerator}), so
+     * 0x00010005 -> 1/5 s and 0x00020001 -> 2 s. FNumber is f-number *
+     * 100 (400 -> f/4.0). ISO is literal with the 0xFFFFFF AUTO sentinel
+     * (the capture's ISO enum list shows AUTO, AUTO 1/2 and AUTO 1/3 all
+     * share that masked value). Returns null only while every field is
+     * still unset/zero (before live view starts); otherwise a line with
+     * whichever fields already carry real values.
+     */
+    private String formatExposure(Integer shutter, Integer aperture, Integer iso) {
+        String shutterText = null;
+        if (shutter != null && shutter != 0 && shutter != 0xFFFFFFFF) {
+            int numerator = (shutter >>> 16) & 0xFFFF;
+            int denominator = shutter & 0xFFFF;
+            if (numerator > 0 && denominator > 0) {
+                if (denominator == 1) shutterText = numerator + "s";
+                else if (numerator == 1) shutterText = "1/" + denominator + "s";
+                else shutterText = numerator + "/" + denominator + "s";
+            }
+        }
+        String apertureText = null;
+        if (aperture != null && aperture > 0) {
+            apertureText = String.format(Locale.US, "f/%.1f", aperture / 100.0);
+        }
+        String isoText = null;
+        if (iso != null && iso != 0) {
+            isoText = (iso & 0xFFFFFF) == 0xFFFFFF ? "ISO AUTO" : "ISO " + (iso & 0xFFFFFF);
+        }
+        if (shutterText == null && apertureText == null && isoText == null) return null;
+        StringBuilder label = new StringBuilder();
+        if (shutterText != null) label.append(shutterText);
+        if (apertureText != null) {
+            if (label.length() > 0) label.append(" · ");
+            label.append(apertureText);
+        }
+        if (isoText != null) {
+            if (label.length() > 0) label.append(" · ");
+            label.append(isoText);
+        }
+        return label.toString();
+    }
+
+    /** PTP data type width in bytes: 1/2 = 1, 3/4 = 2, 5/6 = 4, 7/8 = 8, 9/10 = 16. */
+    private static int dataSize(int datatype) {
+        switch (datatype & 0x0F) {
+            case 1: case 2: return 1;
+            case 3: case 4: return 2;
+            case 5: case 6: return 4;
+            case 7: case 8: return 8;
+            case 9: case 10: return 16;
+            default: return 0;
+        }
+    }
+
+    /** Reads a little-endian value, sign-extended for PTP's odd (signed) types. */
+    private static long readValue(byte[] bytes, int offset, int size, int datatype) {
+        long value = 0;
+        for (int k = size - 1; k >= 0; k--) {
+            value = (value << 8) | (bytes[offset + k] & 0xff);
+        }
+        if ((datatype & 1) == 1) {
+            int bits = size * 8;
+            if (bits < 64 && (value & (1L << (bits - 1))) != 0) {
+                value |= -1L << bits; // sign extend
+            }
+        }
+        return value;
+    }
+
+    private static int u16(byte[] bytes, int offset) {
+        return (bytes[offset] & 0xff) | ((bytes[offset + 1] & 0xff) << 8);
+    }
+
+    private static long u64(byte[] bytes, int offset) {
+        long value = 0;
+        for (int k = 7; k >= 0; k--) {
+            value = (value << 8) | (bytes[offset + k] & 0xff);
+        }
+        return value;
     }
 
     private int findLittleEndianWord(byte[] bytes, int value) {
