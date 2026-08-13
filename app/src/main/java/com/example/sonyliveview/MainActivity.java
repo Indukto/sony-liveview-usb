@@ -18,6 +18,8 @@ import android.os.SystemClock;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.FrameLayout;
@@ -80,7 +82,7 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     private TextView logView;
     private ScrollView logScroll;
 
-    // Video page
+    // Video page (the filming stage)
     private ImageView previewView;
     private TextView startingView;
     private TextView videoFpsLabel;
@@ -88,6 +90,8 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     private TextView videoBatteryLabel;
     private TextView videoExposureLabel;
     private TextView videoStatusLabel;
+    private GridOverlayView gridView;
+    private Button gridButton;
 
     // Last battery percent reported by the camera via the Sony 0xD218
     // property (from the 0x9209 GetAllDevicePropData container), or -1
@@ -118,6 +122,9 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     // like peaking and the histogram.
     private boolean zebraEnabled;
     private Button zebraButton;
+
+    // Rule-of-thirds grid overlay (display-side only).
+    private boolean gridEnabled;
     private final int[][] histogramBins = new int[3][HistogramView.BINS];
     private static final int HISTOGRAM_SAMPLE_WIDTH = 128;
 
@@ -260,7 +267,14 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         startingView.setGravity(Gravity.CENTER);
         page.addView(startingView, new FrameLayout.LayoutParams(-1, -1));
 
-        Button backButton = makeOverlayButton("◀ Stop");
+        // Rule-of-thirds grid over the frame; hidden until the Grid tool is on.
+        gridView = new GridOverlayView(this);
+        gridView.setVisibility(View.GONE);
+        page.addView(gridView, new FrameLayout.LayoutParams(-1, -1));
+
+        // Top-left: the only chrome up here is Stop (back to the connection
+        // page). Everything else stays out of the frame.
+        Button backButton = makeOverlayButton("Stop");
         backButton.setOnClickListener(v -> {
             if (camera != null) camera.stopLiveView();
             showConnectionPage(COLOR_BUSY, "Stopping…");
@@ -270,26 +284,78 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         backParams.setMargins(dp(12), dp(12), 0, 0);
         page.addView(backButton, backParams);
 
+        // Top-right: one translucent panel with the filming readouts instead of
+        // four loose labels floating over the frame.
+        LinearLayout infoPanel = new LinearLayout(this);
+        infoPanel.setOrientation(LinearLayout.VERTICAL);
+        infoPanel.setPadding(dp(12), dp(8), dp(12), dp(8));
+        GradientDrawable infoBackground = new GradientDrawable();
+        infoBackground.setColor(0xCC0A0D10);
+        infoBackground.setStroke(dp(1), 0x3380CBC4);
+        infoBackground.setCornerRadius(dp(10));
+        infoPanel.setBackground(infoBackground);
+
+        videoFpsLabel = new TextView(this);
+        videoFpsLabel.setText("FPS 0");
+        videoFpsLabel.setTextColor(COLOR_TEXT);
+        videoFpsLabel.setTextSize(13);
+        videoFpsLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        infoPanel.addView(videoFpsLabel, new LinearLayout.LayoutParams(-2, -2));
+
+        videoExposureLabel = new TextView(this);
+        videoExposureLabel.setTextColor(COLOR_TEXT);
+        videoExposureLabel.setTextSize(12);
+        videoExposureLabel.setVisibility(View.GONE);
+        LinearLayout.LayoutParams exposureLp = new LinearLayout.LayoutParams(-2, -2);
+        exposureLp.topMargin = dp(4);
+        infoPanel.addView(videoExposureLabel, exposureLp);
+
+        videoBatteryLabel = new TextView(this);
+        videoBatteryLabel.setTextColor(COLOR_OK);
+        videoBatteryLabel.setTextSize(12);
+        videoBatteryLabel.setVisibility(View.GONE);
+        LinearLayout.LayoutParams batteryLp = new LinearLayout.LayoutParams(-2, -2);
+        batteryLp.topMargin = dp(2);
+        infoPanel.addView(videoBatteryLabel, batteryLp);
+
+        videoInfoLabel = new TextView(this);
+        videoInfoLabel.setText(lastFrameInfo);
+        videoInfoLabel.setTextColor(COLOR_DIM);
+        videoInfoLabel.setTextSize(11);
+        LinearLayout.LayoutParams infoLp = new LinearLayout.LayoutParams(-2, -2);
+        infoLp.topMargin = dp(4);
+        infoPanel.addView(videoInfoLabel, infoLp);
+
+        FrameLayout.LayoutParams panelParams = new FrameLayout.LayoutParams(-2, -2);
+        panelParams.gravity = Gravity.TOP | Gravity.END;
+        panelParams.setMargins(0, dp(12), dp(12), 0);
+        page.addView(infoPanel, panelParams);
+
+        // Bottom-right: the filming tools as a compact row. Active toggles
+        // light up with their own color (peaking color / amber / accent).
+        LinearLayout tools = new LinearLayout(this);
+        tools.setOrientation(LinearLayout.HORIZONTAL);
+
         peakingButton = makeOverlayButton("Peak: Off");
         peakingButton.setOnClickListener(v -> cyclePeaking());
-        FrameLayout.LayoutParams peakParams = new FrameLayout.LayoutParams(-2, -2);
-        peakParams.gravity = Gravity.TOP | Gravity.START;
-        peakParams.setMargins(dp(12), dp(62), 0, 0);
-        page.addView(peakingButton, peakParams);
-
-        histogramButton = makeOverlayButton("Hist: Off");
-        histogramButton.setOnClickListener(v -> toggleHistogram());
-        FrameLayout.LayoutParams histParams = new FrameLayout.LayoutParams(-2, -2);
-        histParams.gravity = Gravity.TOP | Gravity.START;
-        histParams.setMargins(dp(12), dp(112), 0, 0);
-        page.addView(histogramButton, histParams);
+        tools.addView(peakingButton, lp(-2, -2, 0, 0, 0, dp(6), 0));
 
         zebraButton = makeOverlayButton("Zebra: Off");
         zebraButton.setOnClickListener(v -> toggleZebra());
-        FrameLayout.LayoutParams zebraParams = new FrameLayout.LayoutParams(-2, -2);
-        zebraParams.gravity = Gravity.TOP | Gravity.START;
-        zebraParams.setMargins(dp(12), dp(162), 0, 0);
-        page.addView(zebraButton, zebraParams);
+        tools.addView(zebraButton, lp(-2, -2, 0, 0, 0, dp(6), 0));
+
+        gridButton = makeOverlayButton("Grid: Off");
+        gridButton.setOnClickListener(v -> toggleGrid());
+        tools.addView(gridButton, lp(-2, -2, 0, 0, 0, dp(6), 0));
+
+        histogramButton = makeOverlayButton("Hist: Off");
+        histogramButton.setOnClickListener(v -> toggleHistogram());
+        tools.addView(histogramButton, lp(-2, -2, 0, 0, 0, 0, 0));
+
+        FrameLayout.LayoutParams toolsParams = new FrameLayout.LayoutParams(-2, -2);
+        toolsParams.gravity = Gravity.BOTTOM | Gravity.END;
+        toolsParams.setMargins(0, 0, dp(12), dp(12));
+        page.addView(tools, toolsParams);
 
         histogramView = new HistogramView(this);
         histogramView.setVisibility(View.GONE);
@@ -297,42 +363,6 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         histViewParams.gravity = Gravity.BOTTOM | Gravity.START;
         histViewParams.setMargins(dp(12), 0, 0, dp(12));
         page.addView(histogramView, histViewParams);
-
-        videoFpsLabel = new TextView(this);
-        videoFpsLabel.setText("FPS 0");
-        videoFpsLabel.setTextColor(COLOR_TEXT);
-        videoFpsLabel.setTextSize(13);
-        FrameLayout.LayoutParams fpsParams = new FrameLayout.LayoutParams(-2, -2);
-        fpsParams.gravity = Gravity.TOP | Gravity.END;
-        fpsParams.setMargins(0, dp(14), dp(14), 0);
-        page.addView(videoFpsLabel, fpsParams);
-
-        videoInfoLabel = new TextView(this);
-        videoInfoLabel.setText(lastFrameInfo);
-        videoInfoLabel.setTextColor(COLOR_DIM);
-        videoInfoLabel.setTextSize(12);
-        FrameLayout.LayoutParams infoParams = new FrameLayout.LayoutParams(-2, -2);
-        infoParams.gravity = Gravity.TOP | Gravity.END;
-        infoParams.setMargins(0, dp(40), dp(14), 0);
-        page.addView(videoInfoLabel, infoParams);
-
-        videoBatteryLabel = new TextView(this);
-        videoBatteryLabel.setTextColor(COLOR_OK);
-        videoBatteryLabel.setTextSize(12);
-        videoBatteryLabel.setVisibility(View.GONE);
-        FrameLayout.LayoutParams batteryParams = new FrameLayout.LayoutParams(-2, -2);
-        batteryParams.gravity = Gravity.TOP | Gravity.END;
-        batteryParams.setMargins(0, dp(66), dp(14), 0);
-        page.addView(videoBatteryLabel, batteryParams);
-
-        videoExposureLabel = new TextView(this);
-        videoExposureLabel.setTextColor(COLOR_TEXT);
-        videoExposureLabel.setTextSize(12);
-        videoExposureLabel.setVisibility(View.GONE);
-        FrameLayout.LayoutParams exposureParams = new FrameLayout.LayoutParams(-2, -2);
-        exposureParams.gravity = Gravity.TOP | Gravity.END;
-        exposureParams.setMargins(0, dp(88), dp(14), 0);
-        page.addView(videoExposureLabel, exposureParams);
 
         videoStatusLabel = new TextView(this);
         videoStatusLabel.setTextColor(COLOR_BUSY);
@@ -357,16 +387,24 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         Button button = new Button(this);
         button.setText(text);
         button.setTextColor(COLOR_TEXT);
-        button.setTextSize(13);
+        button.setTextSize(12);
         button.setAllCaps(false);
-        button.setMinHeight(dp(40));
-        button.setPadding(dp(14), 0, dp(14), 0);
+        button.setMinHeight(dp(34));
+        button.setMinWidth(0);
+        button.setPadding(dp(12), 0, dp(12), 0);
         GradientDrawable background = new GradientDrawable();
         background.setColor(0xB3000000);
-        background.setStroke(dp(1), COLOR_TEXT);
-        background.setCornerRadius(dp(10));
+        background.setStroke(dp(1), 0x3380CBC4);
+        background.setCornerRadius(dp(9));
         button.setBackground(background);
         return button;
+    }
+
+    /** Colors an overlay toggle's text and border to show its active state. */
+    private void styleToggle(Button button, boolean active, int activeColor) {
+        button.setTextColor(active ? activeColor : COLOR_TEXT);
+        GradientDrawable background = (GradientDrawable) button.getBackground();
+        background.setStroke(dp(1), active ? activeColor : 0x3380CBC4);
     }
 
     private LinearLayout spacer() {
@@ -408,14 +446,14 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
             label = "Peak: " + (peakingIndex == 1 ? "Red" : peakingIndex == 2 ? "Yellow" : "White");
         }
         peakingButton.setText(label);
-        peakingButton.setTextColor(color);
+        styleToggle(peakingButton, peakingIndex != 0, color);
         appendStatus("Focus peaking " + (peakingIndex == 0 ? "off" : "on (" + label.substring(6) + ")"));
     }
 
     private void toggleHistogram() {
         histogramEnabled = !histogramEnabled;
         histogramButton.setText(histogramEnabled ? "Hist: On" : "Hist: Off");
-        histogramButton.setTextColor(histogramEnabled ? COLOR_ACCENT : COLOR_TEXT);
+        styleToggle(histogramButton, histogramEnabled, COLOR_ACCENT);
         histogramView.setVisibility(histogramEnabled ? View.VISIBLE : View.GONE);
         appendStatus("Histogram " + (histogramEnabled ? "on" : "off"));
     }
@@ -423,18 +461,50 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     private void toggleZebra() {
         zebraEnabled = !zebraEnabled;
         zebraButton.setText(zebraEnabled ? "Zebra: 100%" : "Zebra: Off");
-        zebraButton.setTextColor(zebraEnabled ? COLOR_BUSY : COLOR_TEXT);
+        styleToggle(zebraButton, zebraEnabled, COLOR_BUSY);
         appendStatus("Zebra " + (zebraEnabled ? "on (100%)" : "off"));
+    }
+
+    private void toggleGrid() {
+        gridEnabled = !gridEnabled;
+        gridButton.setText(gridEnabled ? "Grid: Thirds" : "Grid: Off");
+        styleToggle(gridButton, gridEnabled, COLOR_ACCENT);
+        gridView.setThirds(gridEnabled);
+        appendStatus("Thirds grid " + (gridEnabled ? "on" : "off"));
     }
 
     private void showConnectionPage(int color, String label) {
         flipper.setDisplayedChild(PAGE_CONNECTION);
+        applyStageImmersive(false);
         setStatus(color, label);
     }
 
     private void showVideoPage() {
         startingView.setVisibility(View.VISIBLE);
         flipper.setDisplayedChild(PAGE_VIDEO);
+        // The filming stage goes edge-to-edge: hide the system bars so the
+        // frame fills the screen; a swipe reveals them transiently.
+        applyStageImmersive(true);
+    }
+
+    /** Hides (true) or restores (false) the system bars for the video stage. */
+    private void applyStageImmersive(boolean immersive) {
+        View decor = getWindow().getDecorView();
+        if (Build.VERSION.SDK_INT >= 30) {
+            WindowInsetsController controller = getWindow().getInsetsController();
+            if (controller == null) return;
+            if (immersive) {
+                controller.hide(WindowInsets.Type.systemBars());
+                controller.setSystemBarsBehavior(
+                        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            } else {
+                controller.show(WindowInsets.Type.systemBars());
+            }
+        } else {
+            decor.setSystemUiVisibility(immersive
+                    ? View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_FULLSCREEN
+                    : View.SYSTEM_UI_FLAG_VISIBLE);
+        }
     }
 
     private void setStatus(int color, String label) {
@@ -716,6 +786,7 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
             startingView.setVisibility(View.GONE);
             videoStatusLabel.setVisibility(View.GONE);
             videoInfoLabel.setText(lastFrameInfo);
+            gridView.setImageAspect(width, height);
             if (showAspectTip) {
                 appendStatus("Tip: camera Aspect Ratio is 16:9 (1024×574). " +
                         "Set it to 3:2 on the camera for a taller 1024×680 live view.");
@@ -728,6 +799,7 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         runOnUiThread(() -> {
             connected = false;
             showConnectionPage(COLOR_ERR, "Disconnected");
+            applyStageImmersive(false);
             appendStatus("Camera connection closed.");
             setButtonEnabled(connectButton, true);
             setButtonEnabled(disconnectButton, false);

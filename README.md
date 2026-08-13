@@ -157,32 +157,40 @@ PTP2 path and adds experiment levers:
   only once, then `GetObject` alone while it keeps returning `0x2001` (one
   fewer PTP round trip per frame). If a `GetObject` fails, `GetObjectInfo` is
   re-issued to re-sync. This is the first experiment worth running.
-- **Focus peaking** (video page, below Stop): a display-side edge
-  highlighter that tints in-focus detail Sony-style — cycle **Peak: Off → Red
-  → Yellow → White**. It is computed on the decoder thread and never writes
-  to the camera, so it cannot trigger the a6300's pipe stall.
-- **Live RGB histogram** (video page, below Peak): a **Hist: Off/On** toggle
-  shows an Imaging Edge-style R/G/B histogram, generated in-app from a
+The video page is laid out as a filming stage: the live view runs edge-to-edge
+in immersive fullscreen (system bars hidden; swipe to reveal), with a single
+translucent readout panel in the top-right corner (FPS/dup/interval, exposure,
+battery, frame info) and a compact tool row along the bottom-right:
+
+- **Focus peaking**: a **Peak: Off → Red → Yellow → White** cycle button
+  tints in-focus edges Sony-style. Computed on the decoder thread and never
+  writes to the camera, so it cannot trigger the a6300's pipe stall. The
+  active color lights up the button's text and border.
+- **Zebra exposure aid**: a **Zebra: Off/100%** toggle overlays classic
+  diagonal black/white stripes on every pixel at or above JPEG white
+  (luma ≥ 254). Display-side only, same as peaking.
+- **Thirds grid**: a **Grid: Off/Thirds** toggle draws rule-of-thirds lines
+  plus a small center reticle, fitted to the actual image rectangle (the
+  preview is `FIT_CENTER`, so the lines follow the frame, not the screen's
+  letterbox bars). Purely a drawing overlay.
+- **Live RGB histogram**: a **Hist: Off/On** toggle shows an Imaging
+  Edge-style R/G/B histogram at the bottom-left, generated in-app from a
   128px-wide sample of the displayed frame (the camera sends no histogram
   data on the PTP live view path; Imaging Edge computes its overlay
   client-side the same way). The histogram is sampled before peaking so the
   tint never skews it, and it costs under ~0.1 ms per frame on the decoder
   thread.
-- **Zebra exposure aid** (video page, below Hist): a **Zebra: Off/100%**
-  toggle overlays classic diagonal black/white stripes on every pixel at or
-  above JPEG white (luma ≥ 254). Like peaking it is computed on the decoder
-  thread and never writes to the camera.
-- **Exposure readout** (video page, under the battery): the shutter speed,
-  f-number and ISO decoded from the same `0x9209` property block as the
-  battery (see the table above), e.g. `1/5s · f/4.0 · ISO AUTO`. It updates
-  live as the exposure changes and is logged to the status panel once per
-  change.
-- **Frame diagnostics**: the FPS overlay shows received fps, consecutive
-  duplicates and the average frame interval (`FPS 11 · dup 0 · 91ms`). Stale
-  identical JPEGs are not decoded or redrawn. If `dup` stays high, the camera
-  is serving frames slower than the loop runs; if the interval stays ~85–90 ms
-  with the checkbox on, that is the camera's own frame-generation floor and
-  only the SDIO stream will raise it.
+- **Exposure readout**: the shutter speed, f-number and ISO decoded from
+  the same `0x9209` property block as the battery (see the table above), e.g.
+  `1/5s · f/4.0 · ISO AUTO`. It updates live as the exposure changes and is
+  logged to the status panel once per change.
+- **Frame diagnostics**: the readout panel shows received fps, consecutive
+  duplicates and the average frame interval (`FPS 11 · dup 0 · 91ms`) plus
+  the decoded resolution and frame counter. Stale identical JPEGs are not
+  decoded or redrawn. If `dup` stays high, the camera is serving frames
+  slower than the loop runs; if the interval stays ~85–90 ms with the
+  checkbox on, that is the camera's own frame-generation floor and only the
+  SDIO stream will raise it.
 
 **Do not send `0x9205` (SetExtDevicePropValue) to the a6300.** A property
 write there — even a documented property such as LiveView mode `0xD26A` — can
