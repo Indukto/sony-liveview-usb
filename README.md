@@ -142,6 +142,10 @@ PTP2 path and adds experiment levers:
   only once, then `GetObject` alone while it keeps returning `0x2001` (one
   fewer PTP round trip per frame). If a `GetObject` fails, `GetObjectInfo` is
   re-issued to re-sync. This is the first experiment worth running.
+- **Focus peaking** (video page, below Stop): a display-side edge
+  highlighter that tints in-focus detail Sony-style — cycle **Peak: Off → Red
+  → Yellow → White**. It is computed on the decoder thread and never writes
+  to the camera, so it cannot trigger the a6300's pipe stall.
 - **Frame diagnostics**: the FPS overlay shows received fps, consecutive
   duplicates and the average frame interval (`FPS 11 · dup 0 · 91ms`). Stale
   identical JPEGs are not decoded or redrawn. If `dup` stays high, the camera

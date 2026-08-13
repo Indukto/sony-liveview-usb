@@ -94,6 +94,11 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     private byte[] lastJpeg;
     private boolean aspectTipShown;
 
+    // Focus peaking: 0 = off, 1 = red, 2 = yellow, 3 = white. Display-side
+    // only (FocusPeaking), so no camera writes and no stall risk.
+    private int peakingIndex;
+    private Button peakingButton;
+
     // JPEG decode runs off the camera's read thread so decoding (10-30 ms per
     // frame) never stalls the PTP transaction loop. Only the newest frame is
     // decoded; stale frames are dropped instead of queued up.
@@ -237,6 +242,13 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         backParams.setMargins(dp(12), dp(12), 0, 0);
         page.addView(backButton, backParams);
 
+        peakingButton = makeOverlayButton("Peak: Off");
+        peakingButton.setOnClickListener(v -> cyclePeaking());
+        FrameLayout.LayoutParams peakParams = new FrameLayout.LayoutParams(-2, -2);
+        peakParams.gravity = Gravity.TOP | Gravity.START;
+        peakParams.setMargins(dp(12), dp(62), 0, 0);
+        page.addView(peakingButton, peakParams);
+
         videoFpsLabel = new TextView(this);
         videoFpsLabel.setText("FPS 0");
         videoFpsLabel.setTextColor(COLOR_TEXT);
@@ -315,6 +327,22 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     private void setButtonEnabled(Button button, boolean enabled) {
         button.setEnabled(enabled);
         button.setAlpha(enabled ? 1f : 0.35f);
+    }
+
+    private void cyclePeaking() {
+        peakingIndex = (peakingIndex + 1) % (FocusPeaking.COLORS.length + 1);
+        String label;
+        int color;
+        if (peakingIndex == 0) {
+            label = "Peak: Off";
+            color = COLOR_TEXT;
+        } else {
+            color = FocusPeaking.COLORS[peakingIndex - 1];
+            label = "Peak: " + (peakingIndex == 1 ? "Red" : peakingIndex == 2 ? "Yellow" : "White");
+        }
+        peakingButton.setText(label);
+        peakingButton.setTextColor(color);
+        appendStatus("Focus peaking " + (peakingIndex == 0 ? "off" : "on (" + label.substring(6) + ")"));
     }
 
     private void showConnectionPage(int color, String label) {
@@ -546,8 +574,14 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         final boolean showAspectTip = !aspectTipShown && width == 1024 && height == 574;
         if (showAspectTip) aspectTipShown = true;
         lastFrameInfo = "JPEG " + width + "×" + height + " · frame #" + frameCount;
+        if (peakingIndex > 0) {
+            // Runs on the decoder thread, which is also the only thread that
+            // touches FocusPeaking's reused buffers - safe without locks.
+            bitmap = FocusPeaking.apply(bitmap, FocusPeaking.COLORS[peakingIndex - 1]);
+        }
+        final Bitmap shownBitmap = bitmap;
         runOnUiThread(() -> {
-            previewView.setImageBitmap(bitmap);
+            previewView.setImageBitmap(shownBitmap);
             startingView.setVisibility(View.GONE);
             videoStatusLabel.setVisibility(View.GONE);
             videoInfoLabel.setText(lastFrameInfo);
