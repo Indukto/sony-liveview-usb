@@ -22,6 +22,7 @@ public final class PtpUsbCamera implements AutoCloseable {
         void onState(String message);
         void onReady();
         void onFrame(byte[] jpeg);
+        void onBattery(int percent);
         void onClosed();
     }
 
@@ -76,6 +77,10 @@ public final class PtpUsbCamera implements AutoCloseable {
     private static final int SONY_STANDBY_MODE = 0x00000001;
     private static final int SONY_LIVE_VIEW_STATUS = 0xD221;
     private static final int SONY_LIVE_VIEW_OBJECT = 0xFFFFC002;
+    // Sony device property returned inside the 0x9209 data container:
+    // 0xD218 = Battery Level (INT8 percent), confirmed against the Imaging
+    // Edge capture (0x0E = 14% in all 110 GetAllDevicePropData responses).
+    private static final int SONY_BATTERY_LEVEL = 0xD218;
     // NOTE: Sony's SetExtDevicePropValue (0x9205) is NOT sent to the a6300.
     // A property write there (even a documented one such as LiveView mode
     // 0xD26A) can STALL the camera's bulk OUT pipe at the USB level (-1 on
@@ -96,6 +101,10 @@ public final class PtpUsbCamera implements AutoCloseable {
     // keeps returning 0x2001 (one fewer PTP round trip per frame). If a
     // GetObject fails, GetObjectInfo is re-issued to re-sync.
     private volatile boolean skipObjectInfo = false;
+    // Most recently seen battery percent (0..100) or -1 before the first
+    // 0x9209 data container is parsed. The listener is only notified on
+    // change, so the per-frame polls do not spam the UI thread.
+    private volatile int lastBatteryPercent = -1;
     private UsbDeviceConnection connection;
     private UsbEndpoint bulkIn;
     private UsbEndpoint bulkOut;
@@ -507,6 +516,9 @@ public final class PtpUsbCamera implements AutoCloseable {
             jpegExtractor.accept(container.raw, listener);
             if (container.type == PTP_DATA) {
                 logDataContainer(container);
+                if (container.code == SONY_GET_ALL_EXT_DEVICE_INFO) {
+                    parseBattery(container.raw);
+                }
             }
             if (container.type == PTP_RESPONSE) {
                 Log.i(TAG, String.format("PTP response operation=%s code=0x%04X transaction=%d",
@@ -613,6 +625,38 @@ public final class PtpUsbCamera implements AutoCloseable {
             int dumpStart = Math.max(12, marker - 8);
             int dumpLength = Math.min(48, container.raw.length - dumpStart);
             Log.d(TAG, "D221 dataset bytes: " + hex(container.raw, dumpStart, dumpLength));
+        }
+    }
+
+    /**
+     * Extracts Sony property 0xD218 (Battery Level) from a 0x9209 data
+     * container. The container payload is the full Sony device-property
+     * block; the battery record is:
+     *
+     *     u16 code (0xD218), u16 datatype (0x0001 = INT8), u8 get/set,
+     *     u8 sony, u8 factory default, u8 current value, u8 form, ...
+     *
+     * e.g. 18 D2 01 00 00 02 FF 0E 01 FF -> value 0x0E = 14%. The record
+     * is scanned for rather than walked because the block mixes variable-
+     * length property records and the D221 status section; the code +
+     * datatype + form guard makes a false match essentially impossible.
+     */
+    private void parseBattery(byte[] container) {
+        for (int i = 12; i + 10 <= container.length; i++) {
+            if ((container[i] & 0xff) != 0x18 || (container[i + 1] & 0xff) != 0xD2) {
+                continue;
+            }
+            int datatype = (container[i + 2] & 0xff) | ((container[i + 3] & 0xff) << 8);
+            if (datatype != 0x0001) continue;
+            int form = container[i + 8] & 0xff;
+            if (form != 0x01 && form != 0x02 && form != 0xFF) continue;
+            int percent = container[i + 7] & 0xff;
+            if (percent != lastBatteryPercent) {
+                lastBatteryPercent = percent;
+                Log.i(TAG, "Sony battery level: " + percent + "% (property 0xD218)");
+                listener.onBattery(percent);
+            }
+            return;
         }
     }
 

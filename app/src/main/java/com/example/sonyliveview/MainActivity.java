@@ -71,6 +71,7 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
 
     // Connection page
     private TextView statusLabel;
+    private TextView connectionBatteryLabel;
     private View statusDot;
     private Button connectButton;
     private Button liveViewButton;
@@ -84,7 +85,13 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     private TextView startingView;
     private TextView videoFpsLabel;
     private TextView videoInfoLabel;
+    private TextView videoBatteryLabel;
     private TextView videoStatusLabel;
+
+    // Last battery percent reported by the camera via the Sony 0xD218
+    // property (from the 0x9209 GetAllDevicePropData container), or -1
+    // until the first read. -1 means the label stays hidden.
+    private volatile int batteryPercent = -1;
 
     private int frameCount;
     private int fpsCount;
@@ -162,6 +169,12 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         statusLabel.setTextSize(13);
         statusLabel.setPadding(dp(8), 0, 0, 0);
         toolbar.addView(statusLabel, lp(-2, -2, 0, 0, 0, dp(16), 0));
+
+        connectionBatteryLabel = new TextView(this);
+        connectionBatteryLabel.setTextSize(13);
+        connectionBatteryLabel.setTextColor(COLOR_OK);
+        connectionBatteryLabel.setPadding(dp(8), 0, 0, 0);
+        toolbar.addView(connectionBatteryLabel, lp(-2, -2, 0, 0, 0, dp(16), 0));
 
         page.addView(toolbar, lp(-1, -2, 0, 0, 0, 0, 0));
 
@@ -289,6 +302,15 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         infoParams.gravity = Gravity.TOP | Gravity.END;
         infoParams.setMargins(0, dp(40), dp(14), 0);
         page.addView(videoInfoLabel, infoParams);
+
+        videoBatteryLabel = new TextView(this);
+        videoBatteryLabel.setTextColor(COLOR_OK);
+        videoBatteryLabel.setTextSize(12);
+        videoBatteryLabel.setVisibility(View.GONE);
+        FrameLayout.LayoutParams batteryParams = new FrameLayout.LayoutParams(-2, -2);
+        batteryParams.gravity = Gravity.TOP | Gravity.END;
+        batteryParams.setMargins(0, dp(66), dp(14), 0);
+        page.addView(videoBatteryLabel, batteryParams);
 
         videoStatusLabel = new TextView(this);
         videoStatusLabel.setTextColor(COLOR_BUSY);
@@ -559,6 +581,17 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     }
 
     @Override
+    public void onBattery(int percent) {
+        batteryPercent = percent;
+        runOnUiThread(() -> {
+            String label = "BATTERY " + percent + "%";
+            connectionBatteryLabel.setText(label);
+            videoBatteryLabel.setText(label);
+            videoBatteryLabel.setVisibility(View.VISIBLE);
+        });
+    }
+
+    @Override
     public void onFrame(byte[] jpeg) {
         // Received-frame accounting runs here on the camera thread; it only
         // does cheap counters plus a one-line log, never a JPEG decode.
@@ -658,6 +691,10 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
             setButtonEnabled(liveViewButton, false);
             videoFpsLabel.setText("FPS 0");
             videoInfoLabel.setText("No frames yet");
+            batteryPercent = -1;
+            connectionBatteryLabel.setText("");
+            videoBatteryLabel.setText("");
+            videoBatteryLabel.setVisibility(View.GONE);
         });
     }
 

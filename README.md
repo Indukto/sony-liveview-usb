@@ -62,6 +62,10 @@ The supplied capture has now replaced the earlier speculative `0x9251`/D221 plan
 9. Repeated `GetObjectInfo(0xFFFFC002)` followed by `GetObject(0xFFFFC002)`.
 10. The `GetObject` data container is multi-transfer and contains JPEG bytes beginning with `FF D8`; the capture contains 99 JPEG bulk transfers.
 
+### Battery level (`0x9209` → `0xD218`)
+
+Every `0x9209` data container carries the full Sony device-property block, and it includes property **`0xD218` (Battery Level, INT8 percent)**. The capture was checked: all **110** `0x9209` responses contain `18 D2 01 00 00 02 FF 0E 01 FF` → current value `0x0E` = **14%**, over the 9.44 s polling span. The app parses this record out of each `0x9209` data container (scan for `0xD218` + datatype `0x0001` + a known form byte) and shows `BATTERY n%` on the connection page and the video overlay; the listener fires only when the value changes. No extra transaction is needed — the readiness polls already fetch it.
+
 The capture uses bulk OUT `0x02`, bulk IN `0x81`, and interrupt IN `0x83`. It does not contain the previously added `0x9205` priority or `0x5013` standby transactions, so the Android prototype now follows the observed Imaging Edge order instead of sending those unconfirmed commands. The host keeps a read pending on interrupt IN `0x83` from OpenSession onward; once the SDIO connect completes, the camera pushes a 16-byte PTP Event container (`0xC203`, parameter `0xD21D`) every few hundred milliseconds, so the app drains that endpoint too.
 
 ## Why the first `0x9209` read used to fail on Android
