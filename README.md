@@ -159,8 +159,8 @@ PTP2 path and adds experiment levers:
   re-issued to re-sync. This is the first experiment worth running.
 The video page is laid out as a filming stage: the live view runs edge-to-edge
 in immersive fullscreen (system bars hidden; swipe to reveal), with a single
-translucent readout panel in the top-right corner (FPS/dup/interval, exposure,
-battery, frame info) and a compact tool row along the bottom-right:
+translucent readout panel in the top-right corner (FPS/interval, exposure,
+battery) and a compact tool row along the bottom-right:
 
 - **Focus peaking**: a **Peak: Off → Red → Yellow → White** cycle button
   tints in-focus edges Sony-style. Computed on the decoder thread and never
@@ -205,13 +205,11 @@ battery, frame info) and a compact tool row along the bottom-right:
   the same `0x9209` property block as the battery (see the table above), e.g.
   `1/5s · f/4.0 · ISO AUTO`. It updates live as the exposure changes and is
   logged to the status panel once per change.
-- **Frame diagnostics**: the readout panel shows received fps, consecutive
-  duplicates and the average frame interval (`FPS 11 · dup 0 · 91ms`) plus
-  the decoded resolution and frame counter. Stale identical JPEGs are not
-  decoded or redrawn. If `dup` stays high, the camera is serving frames
-  slower than the loop runs; if the interval stays ~85–90 ms with the
-  checkbox on, that is the camera's own frame-generation floor and only the
-  SDIO stream will raise it.
+- **Frame rate**: the readout panel's top line shows the live fps and the
+  average frame interval (`FPS 11 · 91ms`). Stale identical JPEGs are skipped
+  without being decoded or redrawn, so the fps is of genuinely new frames. If
+  the interval stays ~85–90 ms with the checkbox on, that is the camera's own
+  frame-generation floor and only the SDIO stream will raise it.
 
 **Do not send `0x9205` (SetExtDevicePropValue) to the a6300.** A property
 write there — even a documented property such as LiveView mode `0xD26A` — can

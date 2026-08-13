@@ -21,6 +21,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.FrameLayout;
@@ -89,7 +90,6 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     private ImageView previewView;
     private TextView startingView;
     private TextView videoFpsLabel;
-    private TextView videoInfoLabel;
     private TextView videoBatteryLabel;
     private TextView videoExposureLabel;
     private TextView videoStatusLabel;
@@ -103,9 +103,7 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
 
     private int frameCount;
     private int fpsCount;
-    private int dupCount;
     private long fpsWindowStart;
-    private String lastFrameInfo = "No frames yet";
     private byte[] lastJpeg;
     private boolean aspectTipShown;
 
@@ -372,14 +370,6 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         batteryLp.topMargin = dp(2);
         infoPanel.addView(videoBatteryLabel, batteryLp);
 
-        videoInfoLabel = new TextView(this);
-        videoInfoLabel.setText(lastFrameInfo);
-        videoInfoLabel.setTextColor(COLOR_DIM);
-        videoInfoLabel.setTextSize(11);
-        LinearLayout.LayoutParams infoLp = new LinearLayout.LayoutParams(-2, -2);
-        infoLp.topMargin = dp(4);
-        infoPanel.addView(videoInfoLabel, infoLp);
-
         FrameLayout.LayoutParams panelParams = new FrameLayout.LayoutParams(-2, -2);
         panelParams.gravity = Gravity.TOP | Gravity.END;
         panelParams.setMargins(0, dp(12), dp(12), 0);
@@ -570,6 +560,9 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     private void showConnectionPage(int color, String label) {
         flipper.setDisplayedChild(PAGE_CONNECTION);
         applyStageImmersive(false);
+        // The connection page is not a shooting surface: let the screen sleep
+        // on its normal timeout again.
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         setStatus(color, label);
     }
 
@@ -579,6 +572,10 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         // The filming stage goes edge-to-edge: hide the system bars so the
         // frame fills the screen; a swipe reveals them transiently.
         applyStageImmersive(true);
+        // Never let the display sleep while the stage is up - a monitor that
+        // dims mid-shot is useless. The flag lives only while the video page
+        // is shown; leaving the stage clears it.
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
 
     /** Hides (true) or restores (false) the system bars for the video stage. */
@@ -800,11 +797,8 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         int currentFrame = ++frameCount;
         fpsCount++;
         // Consecutive identical JPEGs mean the camera served a stale frame
-        // (it had not produced a new one yet). They are counted but not
-        // decoded, so the FPS overlay shows how many are genuinely new.
-        if (Arrays.equals(jpeg, lastJpeg)) {
-            dupCount++;
-        } else {
+        // (it had not produced a new one yet); they are skipped, not decoded.
+        if (!Arrays.equals(jpeg, lastJpeg)) {
             lastJpeg = jpeg;
             latestJpeg.set(jpeg);
             decoderExecutor.execute(this::decodeAndShow);
@@ -814,12 +808,10 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         long elapsed = now - fpsWindowStart;
         if (elapsed >= 1000) {
             final int fps = (int) Math.round(fpsCount * 1000.0 / elapsed);
-            final int dups = dupCount;
             fpsCount = 0;
-            dupCount = 0;
             fpsWindowStart = now;
             final String interval = fps > 0 ? String.format(Locale.US, "%dms", 1000 / fps) : "-";
-            runOnUiThread(() -> videoFpsLabel.setText("FPS " + fps + " · dup " + dups + " · " + interval));
+            runOnUiThread(() -> videoFpsLabel.setText("FPS " + fps + " · " + interval));
         }
         if (currentFrame == 1 || currentFrame % 30 == 0) {
             Log.d(TAG, "JPEG frames received=" + currentFrame + " latestBytes=" + jpeg.length);
@@ -857,7 +849,6 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         final int height = bitmap.getHeight();
         final boolean showAspectTip = !aspectTipShown && width == 1024 && height == 574;
         if (showAspectTip) aspectTipShown = true;
-        lastFrameInfo = "JPEG " + width + "×" + height + " · frame #" + frameCount;
         final int desqueeze = desqueezeIndex;
         final float desqueezeFactor = desqueeze > 0 ? DESQUEEZE_FACTORS[desqueeze - 1] : 1f;
         // Histogram comes from the untouched frame (peaking would skew it).
@@ -892,7 +883,6 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
             previewView.setImageBitmap(shownBitmap);
             startingView.setVisibility(View.GONE);
             videoStatusLabel.setVisibility(View.GONE);
-            videoInfoLabel.setText(lastFrameInfo);
             // Grid and scope follow the displayed (desqueezed) image rectangle.
             int shownWidth = Math.round(width * desqueezeFactor);
             gridView.setImageAspect(shownWidth, height);
@@ -924,7 +914,6 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
             setButtonEnabled(disconnectButton, false);
             setButtonEnabled(liveViewButton, false);
             videoFpsLabel.setText("FPS 0");
-            videoInfoLabel.setText("No frames yet");
             batteryPercent = -1;
             connectionBatteryLabel.setText("");
             videoBatteryLabel.setText("");
