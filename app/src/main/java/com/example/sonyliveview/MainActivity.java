@@ -16,6 +16,9 @@ import android.hardware.usb.UsbManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
+import android.text.style.ForegroundColorSpan;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
@@ -27,6 +30,7 @@ import android.widget.CheckBox;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.ViewFlipper;
@@ -51,17 +55,20 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     private static final String ACTION_USB_PERMISSION = "com.example.sonyliveview.USB_PERMISSION";
     private static final int MAX_LOG_LINES = 200;
 
-    private static final int COLOR_BG = 0xFF0C0F12;
-    private static final int COLOR_PANEL = 0xFF141A20;
-    private static final int COLOR_PREVIEW = 0xFF050607;
-    private static final int COLOR_TEXT = 0xFFB8C4CC;
-    private static final int COLOR_DIM = 0xFF6B7A85;
-    private static final int COLOR_ACCENT = 0xFF80CBC4;
-    private static final int COLOR_OK = 0xFF69DB7C;
-    private static final int COLOR_BUSY = 0xFFFFD43B;
-    private static final int COLOR_ERR = 0xFFFF6B6B;
-    private static final int COLOR_SCOPE = 0xFFD0A9F5;
-    private static final int COLOR_REC = 0xFFE53935;
+    // Palette and shared view factories live in Ui; these aliases keep the
+    // rest of the class readable.
+    private static final int COLOR_BG = Ui.COLOR_BG;
+    private static final int COLOR_PANEL = Ui.COLOR_PANEL;
+    private static final int COLOR_PANEL_SOFT = Ui.COLOR_PANEL_SOFT;
+    private static final int COLOR_PREVIEW = Ui.COLOR_PREVIEW;
+    private static final int COLOR_TEXT = Ui.COLOR_TEXT;
+    private static final int COLOR_DIM = Ui.COLOR_DIM;
+    private static final int COLOR_ACCENT = Ui.COLOR_ACCENT;
+    private static final int COLOR_OK = Ui.COLOR_OK;
+    private static final int COLOR_BUSY = Ui.COLOR_WARN;
+    private static final int COLOR_ERR = Ui.COLOR_ERR;
+    private static final int COLOR_SCOPE = Ui.COLOR_SCOPE;
+    private static final int COLOR_REC = Ui.COLOR_REC;
 
     private static final int PAGE_CONNECTION = 0;
     private static final int PAGE_VIDEO = 1;
@@ -85,16 +92,32 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     private CheckBox skipInfoCheck;
     private TextView logView;
     private ScrollView logScroll;
+    private TextView deviceNameLabel;
+    private TextView deviceDetailLabel;
+    private View deviceAccent;
+    private TextView logCountLabel;
 
     // Video page (the filming stage)
     private ImageView previewView;
-    private TextView startingView;
+    private ProgressBar startingSpinner;
+    private LinearLayout startingPanel;
     private TextView videoFpsLabel;
     private TextView videoBatteryLabel;
     private TextView videoExposureLabel;
     private TextView videoStatusLabel;
+    private TextView videoCameraLabel;
     private GridOverlayView gridView;
     private Button gridButton;
+
+    // Stage chrome that has to stay clear of the display cutout in landscape.
+    private Button stageStopButton;
+    private LinearLayout stageInfoPanel;
+    private LinearLayout stageTools;
+    private LinearLayout appBar;
+    private int insetLeft;
+    private int insetRight;
+    private int insetTop;
+    private int insetBottom;
 
     // Last battery percent reported by the camera via the Sony 0xD218
     // property (from the 0x9209 GetAllDevicePropData container), or -1
@@ -168,7 +191,7 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         buildUi();
         registerUsbReceiver();
         showConnectionPage(COLOR_ERR, "Disconnected");
-        appendStatus("Connect a Sony a6300 in PC Remote mode.");
+        updateDeviceCard();
         appendStatus("USB host ready: " + (usbManager != null));
     }
 
@@ -182,6 +205,79 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         flipper.addView(buildVideoPage(), lp(-1, -1, 0, 0, 0, 0, 0));
         flipper.setDisplayedChild(PAGE_CONNECTION);
         setContentView(flipper);
+        applyWindowInsets();
+    }
+
+    /**
+     * Keeps the stage chrome clear of the display cutout. On a phone in
+     * landscape the camera cutout sits on one of the long edges, right where
+     * the Stop button and the readout panel want to be.
+     */
+    private void applyWindowInsets() {
+        getWindow().getDecorView().setOnApplyWindowInsetsListener((view, insets) -> {
+            if (Build.VERSION.SDK_INT >= 30) {
+                android.graphics.Insets bars = insets.getInsets(
+                        WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                insetLeft = bars.left;
+                insetRight = bars.right;
+                insetTop = bars.top;
+                insetBottom = bars.bottom;
+            } else {
+                insetLeft = insets.getSystemWindowInsetLeft();
+                insetRight = insets.getSystemWindowInsetRight();
+                insetTop = insets.getSystemWindowInsetTop();
+                insetBottom = insets.getSystemWindowInsetBottom();
+            }
+            applyStageInsets();
+            return insets;
+        });
+    }
+
+    /** Re-applies the safe-area margins to the stage chrome. */
+    private void applyStageInsets() {
+        if (appBar != null) {
+            // The app draws edge-to-edge, so the bar has to make room for the
+            // status bar itself.
+            appBar.setPadding(dp(18), dp(14) + insetTop, dp(18), dp(14));
+        }
+        if (logView != null) {
+            logView.setPadding(dp(18), dp(8), dp(18), dp(10) + insetBottom);
+        }
+        if (stageStopButton != null) {
+            FrameLayout.LayoutParams params =
+                    (FrameLayout.LayoutParams) stageStopButton.getLayoutParams();
+            params.setMargins(dp(12) + insetLeft, dp(12) + insetTop, 0, 0);
+            stageStopButton.setLayoutParams(params);
+        }
+        if (stageInfoPanel != null) {
+            FrameLayout.LayoutParams params =
+                    (FrameLayout.LayoutParams) stageInfoPanel.getLayoutParams();
+            params.setMargins(0, dp(12) + insetTop, dp(12) + insetRight, 0);
+            stageInfoPanel.setLayoutParams(params);
+        }
+        if (stageTools != null) {
+            FrameLayout.LayoutParams params =
+                    (FrameLayout.LayoutParams) stageTools.getLayoutParams();
+            params.setMargins(0, 0, dp(12) + insetRight, dp(12) + insetBottom);
+            stageTools.setLayoutParams(params);
+        }
+        if (histogramView != null) {
+            FrameLayout.LayoutParams params =
+                    (FrameLayout.LayoutParams) histogramView.getLayoutParams();
+            params.setMargins(dp(12) + insetLeft, 0, 0, dp(12) + insetBottom);
+            histogramView.setLayoutParams(params);
+        }
+        if (recLabel != null) {
+            FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) recLabel.getLayoutParams();
+            params.setMargins(0, dp(12) + insetTop, 0, 0);
+            recLabel.setLayoutParams(params);
+        }
+        if (videoStatusLabel != null) {
+            FrameLayout.LayoutParams params =
+                    (FrameLayout.LayoutParams) videoStatusLabel.getLayoutParams();
+            params.setMargins(0, 0, 0, dp(16) + insetBottom);
+            videoStatusLabel.setLayoutParams(params);
+        }
     }
 
     private LinearLayout buildConnectionPage() {
@@ -189,94 +285,228 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         page.setOrientation(LinearLayout.VERTICAL);
         page.setBackgroundColor(COLOR_BG);
 
+        page.addView(buildAppBar(), lp(-1, -2, 0, 0, 0, 0, 0));
+        // The rule needs an explicit height: a plain View with wrap_content
+        // expands to fill whatever space is left in a vertical LinearLayout.
+        page.addView(Ui.divider(this, Ui.COLOR_HAIRLINE), lp(-1, dp(1), 0, 0, 0, 0, 0));
+
+        // The page is landscape-only, so the controls sit in a left column and
+        // the session log gets a column of its own instead of a thin strip
+        // under everything else.
+        LinearLayout columns = new LinearLayout(this);
+        columns.setOrientation(LinearLayout.HORIZONTAL);
+        columns.setPadding(dp(20), dp(20), dp(20), dp(14));
+
+        LinearLayout controls = new LinearLayout(this);
+        controls.setOrientation(LinearLayout.VERTICAL);
+
+        controls.addView(buildDeviceCard(), lp(-1, -2, 0, 0, 0, 0, 0));
+        controls.addView(buildActions(), lp(-1, -2, 0, 0, dp(16), 0, 0));
+        controls.addView(buildSetup(), lp(-1, -2, 0, 0, dp(22), 0, 0));
+
+        LinearLayout logColumn = buildLogPanel();
+
+        columns.addView(controls, lp(-1, -1, 0.46f, 0, 0, dp(24), 0));
+        columns.addView(logColumn, lp(-1, -1, 0.54f, 0, 0, 0, 0));
+
+        page.addView(columns, lp(-1, 0, 1, 0, 0, 0, 0));
+        return page;
+    }
+
+    /** Top bar: wordmark, live status and the camera's battery level. */
+    private LinearLayout buildAppBar() {
         LinearLayout toolbar = new LinearLayout(this);
         toolbar.setOrientation(LinearLayout.HORIZONTAL);
         toolbar.setGravity(Gravity.CENTER_VERTICAL);
-        toolbar.setPadding(dp(16), dp(12), dp(16), dp(8));
+        toolbar.setPadding(dp(20), dp(14), dp(20), dp(14));
+        toolbar.setBackgroundColor(COLOR_PANEL_SOFT);
+        appBar = toolbar;
 
-        TextView title = new TextView(this);
-        title.setText("SONY LIVEVIEW");
-        title.setTextColor(COLOR_ACCENT);
-        title.setTextSize(15);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setLetterSpacing(0.15f);
+        TextView title = Ui.text(this, "SONY LIVEVIEW", Ui.SIZE_TITLE, COLOR_ACCENT, true);
+        title.setLetterSpacing(0.16f);
         toolbar.addView(title, lp(-2, -2, 0, 0, 0, dp(20), 0));
 
         statusDot = new View(this);
-        toolbar.addView(statusDot, new LinearLayout.LayoutParams(dp(12), dp(12)));
+        toolbar.addView(statusDot, new LinearLayout.LayoutParams(dp(8), dp(8)));
 
-        statusLabel = new TextView(this);
-        statusLabel.setTextSize(13);
+        statusLabel = Ui.text(this, "Disconnected", Ui.SIZE_LABEL, COLOR_ERR, false);
         statusLabel.setPadding(dp(8), 0, 0, 0);
         toolbar.addView(statusLabel, lp(-2, -2, 0, 0, 0, dp(16), 0));
 
-        connectionBatteryLabel = new TextView(this);
-        connectionBatteryLabel.setTextSize(13);
-        connectionBatteryLabel.setTextColor(COLOR_OK);
-        connectionBatteryLabel.setPadding(dp(8), 0, 0, 0);
-        toolbar.addView(connectionBatteryLabel, lp(-2, -2, 0, 0, 0, dp(16), 0));
+        toolbar.addView(spacer(), lp(0, 0, 1, 0, 0, 0, 0));
 
-        page.addView(toolbar, lp(-1, -2, 0, 0, 0, 0, 0));
+        connectionBatteryLabel = Ui.text(this, "", Ui.SIZE_LABEL, COLOR_OK, false);
+        connectionBatteryLabel.setPadding(dp(10), 0, dp(10), 0);
+        connectionBatteryLabel.setBackground(Ui.surface(this, 0x1A6FDB94, 0x406FDB94, 9));
+        connectionBatteryLabel.setVisibility(View.GONE);
+        toolbar.addView(connectionBatteryLabel, lp(-2, -2, 0, 0, 0, 0, 0));
 
-        LinearLayout controls = new LinearLayout(this);
-        controls.setOrientation(LinearLayout.HORIZONTAL);
-        controls.setGravity(Gravity.CENTER_VERTICAL);
-        controls.setPadding(dp(16), 0, dp(16), dp(12));
+        return toolbar;
+    }
 
-        connectButton = makeButton("Connect", COLOR_ACCENT);
+    /** Card describing the attached USB device. */
+    private View buildDeviceCard() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.HORIZONTAL);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+        card.setPadding(dp(18), dp(16), dp(18), dp(16));
+        card.setBackground(Ui.surface(this, COLOR_PANEL, Ui.COLOR_HAIRLINE, 12));
+
+        deviceAccent = new View(this);
+        deviceAccent.setBackground(Ui.surface(this, COLOR_DIM, android.graphics.Color.TRANSPARENT, 2));
+        LinearLayout.LayoutParams accentParams =
+                new LinearLayout.LayoutParams(dp(3), dp(36));
+        accentParams.setMargins(0, 0, dp(14), 0);
+        card.addView(deviceAccent, accentParams);
+
+        LinearLayout cardText = new LinearLayout(this);
+        cardText.setOrientation(LinearLayout.VERTICAL);
+
+        deviceNameLabel = Ui.text(this, "No camera attached", Ui.SIZE_BODY, COLOR_TEXT, true);
+        cardText.addView(deviceNameLabel, lp(-1, -2, 0, 0, 0, 0, 0));
+
+        deviceDetailLabel = Ui.text(this,
+                "Set USB Connection to PC Remote, then plug in the OTG cable.",
+                Ui.SIZE_LABEL, COLOR_DIM, false);
+        deviceDetailLabel.setMaxLines(2);
+        LinearLayout.LayoutParams detailParams = lp(-1, -2, 0, 0, dp(4), 0, 0);
+        cardText.addView(deviceDetailLabel, detailParams);
+
+        card.addView(cardText, lp(-1, -2, 0, 0, 0, 0, 0));
+        return card;
+    }
+
+    /** Connect / LiveView / Disconnect plus the experimental toggle. */
+    private View buildActions() {
+        LinearLayout group = new LinearLayout(this);
+        group.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+
+        connectButton = Ui.primaryButton(this, "Connect", COLOR_ACCENT);
         connectButton.setOnClickListener(v -> requestCameraPermission());
-        controls.addView(connectButton, lp(-2, -2, 0, 0, 0, dp(8), 0));
+        row.addView(connectButton, lp(-2, dp(44), 0, 0, 0, dp(10), 0));
 
-        liveViewButton = makeButton("Start LiveView", COLOR_OK);
+        liveViewButton = Ui.secondaryButton(this, "Start LiveView", COLOR_OK);
         setButtonEnabled(liveViewButton, false);
         liveViewButton.setOnClickListener(v -> startLiveViewFromConnectionPage());
-        controls.addView(liveViewButton, lp(-2, -2, 0, dp(10), 0, 0, 0));
+        row.addView(liveViewButton, lp(-2, dp(44), 0, 0, 0, dp(10), 0));
 
-        skipInfoCheck = new CheckBox(this);
-        skipInfoCheck.setText("Skip GetObjectInfo");
-        skipInfoCheck.setTextColor(COLOR_DIM);
-        skipInfoCheck.setTextSize(12);
-        skipInfoCheck.setChecked(false);
-        controls.addView(skipInfoCheck, lp(-2, -2, 0, dp(12), 0, 0, 0));
-
-        controls.addView(spacer(), lp(0, 0, 1, 0, 0, 0, 0));
-
-        disconnectButton = makeButton("Disconnect", COLOR_DIM);
+        disconnectButton = Ui.ghostButton(this, "Disconnect", COLOR_DIM);
         setButtonEnabled(disconnectButton, false);
         disconnectButton.setOnClickListener(v -> {
             if (camera != null) camera.close();
             appendStatus("Disconnecting…");
         });
-        controls.addView(disconnectButton, lp(-2, -2, 0, 0, 0, 0, 0));
+        row.addView(disconnectButton, lp(-2, dp(44), 0, 0, 0, 0, 0));
 
-        page.addView(controls, lp(-1, -2, 0, 0, 0, 0, 0));
+        group.addView(row, lp(-1, -2, 0, 0, 0, 0, 0));
 
-        TextView hint = new TextView(this);
-        hint.setText("Connect the a6300 with USB Connection set to PC Remote.\n" +
-                "Once the PTP session is ready, LiveView starts automatically and the\n" +
-                "video takes over the screen. Stop returns here.\n" +
-                "Skip GetObjectInfo is experimental: compare the FPS/dup readout with\n" +
-                "it on and off. For best frame rate keep the camera on JPEG-only,\n" +
-                "manual focus/exposure, no DRO/HDR or effects.");
-        hint.setTextColor(COLOR_DIM);
-        hint.setTextSize(13);
-        hint.setLineSpacing(0, 1.3f);
-        hint.setPadding(dp(16), 0, dp(16), dp(12));
-        page.addView(hint, lp(-1, -2, 0, 0, 0, 0, 0));
+        // The experiment toggle gets its own line so the label is never
+        // squeezed by the buttons.
+        LinearLayout experiment = new LinearLayout(this);
+        experiment.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout toggle = new LinearLayout(this);
+        toggle.setOrientation(LinearLayout.HORIZONTAL);
+        toggle.setGravity(Gravity.CENTER_VERTICAL);
+
+        skipInfoCheck = new CheckBox(this);
+        skipInfoCheck.setText("Skip GetObjectInfo");
+        skipInfoCheck.setTextColor(COLOR_DIM);
+        skipInfoCheck.setTextSize(Ui.SIZE_LABEL);
+        skipInfoCheck.setChecked(false);
+        skipInfoCheck.setButtonTintList(android.content.res.ColorStateList.valueOf(COLOR_DIM));
+        toggle.addView(skipInfoCheck, lp(-2, -2, 0, 0, 0, 0, 0));
+
+        experiment.addView(toggle, lp(-1, -2, 0, 0, 0, 0, 0));
+
+        TextView hint = Ui.text(this, "experimental: one PTP round trip less per frame",
+                Ui.SIZE_LABEL, 0xFF56646E, false);
+        experiment.addView(hint, lp(-1, -2, 0, dp(30), dp(2), 0, 0));
+
+        group.addView(experiment, lp(-1, -2, 0, 0, dp(10), 0, 0));
+        return group;
+    }
+
+    /** The three things to do before the camera shows up. */
+    private View buildSetup() {
+        LinearLayout setup = new LinearLayout(this);
+        setup.setOrientation(LinearLayout.VERTICAL);
+
+        setup.addView(Ui.sectionLabel(this, "Setup"), lp(-1, -2, 0, 0, 0, dp(10), 0));
+        setup.addView(stepRow("1", "Set USB Connection to PC Remote on the camera"),
+                lp(-1, -2, 0, 0, 0, dp(6), 0));
+        setup.addView(stepRow("2", "Connect the OTG cable and allow USB access"),
+                lp(-1, -2, 0, 0, 0, dp(6), 0));
+        setup.addView(stepRow("3", "Press Connect - LiveView starts on its own"),
+                lp(-1, -2, 0, 0, 0, dp(6), 0));
+
+        return setup;
+    }
+
+    /** Session log column: header, rule and the scrolling log itself. */
+    private LinearLayout buildLogPanel() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setBackground(Ui.surface(this, COLOR_PANEL_SOFT, Ui.COLOR_HAIRLINE, 12));
+
+        LinearLayout logHeader = new LinearLayout(this);
+        logHeader.setOrientation(LinearLayout.HORIZONTAL);
+        logHeader.setGravity(Gravity.CENTER_VERTICAL);
+        logHeader.setPadding(dp(18), dp(12), dp(12), dp(12));
+        logHeader.addView(Ui.sectionLabel(this, "Session log"), lp(-2, -2, 0, 0, 0, 0, 0));
+        logHeader.addView(spacer(), lp(0, 0, 1, 0, 0, 0, 0));
+
+        logCountLabel = Ui.text(this, "0 lines", Ui.SIZE_LABEL, COLOR_DIM, false);
+        logHeader.addView(logCountLabel, lp(-2, -2, 0, 0, 0, dp(12), 0));
+
+        Button clearLogButton = Ui.ghostButton(this, "Clear", COLOR_DIM);
+        clearLogButton.setTextSize(11);
+        clearLogButton.setPadding(dp(10), 0, dp(10), 0);
+        clearLogButton.setOnClickListener(v -> {
+            logView.setText("");
+            logCountLabel.setText("0 lines");
+        });
+        logHeader.addView(clearLogButton, lp(-2, dp(28), 0, 0, 0, 0, 0));
+
+        panel.addView(logHeader, lp(-1, -2, 0, 0, 0, 0, 0));
+        panel.addView(Ui.divider(this, Ui.COLOR_HAIRLINE), lp(-1, dp(1), 0, 0, 0, 0, 0));
 
         logScroll = new ScrollView(this);
-        logScroll.setBackgroundColor(COLOR_PANEL);
+        logScroll.setFillViewport(true);
 
         logView = new TextView(this);
         logView.setTextColor(COLOR_TEXT);
-        logView.setTextSize(11);
-        logView.setPadding(dp(16), dp(8), dp(16), dp(8));
+        logView.setTextSize(Ui.SIZE_MONO);
+        logView.setPadding(dp(18), dp(12), dp(18), dp(12));
         logView.setTypeface(Typeface.MONOSPACE);
+        logView.setLineSpacing(dp(2), 1f);
         logScroll.addView(logView, new ScrollView.LayoutParams(-1, -2));
-        logScroll.setVerticalScrollBarEnabled(true);
+        logScroll.setVerticalScrollBarEnabled(false);
 
-        page.addView(logScroll, lp(-1, 0, 1, 0, 0, 0, 0));
-        return page;
+        panel.addView(logScroll, lp(-1, 0, 1, 0, 0, 0, 0));
+        return panel;
+    }
+
+    /** One numbered line of the setup checklist. */
+    private View stepRow(String number, String text) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView index = Ui.text(this, number, 10, COLOR_ACCENT, true);
+        index.setGravity(Gravity.CENTER);
+        index.setBackground(Ui.surface(this, 0x1A80CBC4, 0x4080CBC4, 7));
+        LinearLayout.LayoutParams indexParams = new LinearLayout.LayoutParams(dp(18), dp(18));
+        indexParams.setMargins(0, 0, dp(10), 0);
+        row.addView(index, indexParams);
+
+        TextView label = Ui.text(this, text, Ui.SIZE_LABEL, COLOR_DIM, false);
+        row.addView(label, lp(-1, -2, 0, 0, 0, 0, 0));
+        return row;
     }
 
     private FrameLayout buildVideoPage() {
@@ -287,12 +517,25 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         previewView.setScaleType(ImageView.ScaleType.FIT_CENTER);
         page.addView(previewView, new FrameLayout.LayoutParams(-1, -1));
 
-        startingView = new TextView(this);
-        startingView.setText("Starting LiveView…");
-        startingView.setTextColor(COLOR_DIM);
-        startingView.setTextSize(14);
-        startingView.setGravity(Gravity.CENTER);
-        page.addView(startingView, new FrameLayout.LayoutParams(-1, -1));
+        // Starting state: a quiet spinner instead of a bare line of text.
+        LinearLayout starting = new LinearLayout(this);
+        starting.setOrientation(LinearLayout.VERTICAL);
+        starting.setGravity(Gravity.CENTER);
+
+        startingSpinner = new ProgressBar(this);
+        startingSpinner.setIndeterminate(true);
+        startingSpinner.setIndeterminateTintList(
+                android.content.res.ColorStateList.valueOf(COLOR_ACCENT));
+        starting.addView(startingSpinner, new LinearLayout.LayoutParams(dp(28), dp(28)));
+
+        TextView startingLabel = Ui.text(this, "Starting LiveView…", Ui.SIZE_BODY, COLOR_DIM, false);
+        startingLabel.setGravity(Gravity.CENTER);
+        starting.addView(startingLabel, lp(-2, -2, 0, 0, dp(12), 0, 0));
+        startingPanel = starting;
+
+        FrameLayout.LayoutParams startingParams = new FrameLayout.LayoutParams(-2, -2);
+        startingParams.gravity = Gravity.CENTER;
+        page.addView(starting, startingParams);
 
         // Rule-of-thirds grid over the frame; hidden until the Grid tool is on.
         gridView = new GridOverlayView(this);
@@ -306,31 +549,28 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
 
         // Top-left: the only chrome up here is Stop (back to the connection
         // page). Everything else stays out of the frame.
-        Button backButton = makeOverlayButton("Stop");
+        Button backButton = Ui.ghostButton(this, "Stop", COLOR_TEXT);
+        backButton.setTextSize(Ui.SIZE_LABEL);
+        backButton.setPadding(dp(14), 0, dp(14), 0);
+        backButton.setBackground(Ui.surface(this, 0xB3000000, Ui.COLOR_HAIRLINE, 9));
+        stageStopButton = backButton;
         backButton.setOnClickListener(v -> {
             if (camera != null) camera.stopLiveView();
             showConnectionPage(COLOR_BUSY, "Stopping…");
         });
-        FrameLayout.LayoutParams backParams = new FrameLayout.LayoutParams(-2, -2);
+        FrameLayout.LayoutParams backParams = new FrameLayout.LayoutParams(-2, dp(34));
         backParams.gravity = Gravity.TOP | Gravity.START;
         backParams.setMargins(dp(12), dp(12), 0, 0);
         page.addView(backButton, backParams);
 
         // Top-center: the camera-recording indicator. A label, not a button -
         // movie recording starts/stops on the camera (Sony 0xD21D).
-        recLabel = new TextView(this);
-        recLabel.setText("● REC");
-        recLabel.setTextColor(COLOR_REC);
-        recLabel.setTextSize(13);
-        recLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        recLabel = Ui.text(this, "● REC", Ui.SIZE_LABEL, COLOR_REC, true);
+        recLabel.setLetterSpacing(0.12f);
         recLabel.setGravity(Gravity.CENTER);
-        recLabel.setPadding(dp(12), dp(4), dp(12), dp(4));
+        recLabel.setPadding(dp(12), dp(5), dp(12), dp(5));
         recLabel.setVisibility(View.GONE);
-        GradientDrawable recBackground = new GradientDrawable();
-        recBackground.setColor(0xCC1A0505);
-        recBackground.setStroke(dp(1), COLOR_REC);
-        recBackground.setCornerRadius(dp(9));
-        recLabel.setBackground(recBackground);
+        recLabel.setBackground(Ui.surface(this, 0xE61A0505, COLOR_REC, 9));
         FrameLayout.LayoutParams recParams = new FrameLayout.LayoutParams(-2, -2);
         recParams.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
         recParams.setMargins(0, dp(12), 0, 0);
@@ -340,78 +580,75 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         // four loose labels floating over the frame.
         LinearLayout infoPanel = new LinearLayout(this);
         infoPanel.setOrientation(LinearLayout.VERTICAL);
-        infoPanel.setPadding(dp(12), dp(8), dp(12), dp(8));
-        GradientDrawable infoBackground = new GradientDrawable();
-        infoBackground.setColor(0xCC0A0D10);
-        infoBackground.setStroke(dp(1), 0x3380CBC4);
-        infoBackground.setCornerRadius(dp(10));
-        infoPanel.setBackground(infoBackground);
+        infoPanel.setPadding(dp(12), dp(8), dp(12), dp(9));
+        infoPanel.setBackground(Ui.surface(this, 0xCC0A0D10, 0x3380CBC4, 10));
 
-        videoFpsLabel = new TextView(this);
-        videoFpsLabel.setText("FPS 0");
-        videoFpsLabel.setTextColor(COLOR_TEXT);
-        videoFpsLabel.setTextSize(13);
-        videoFpsLabel.setTypeface(Typeface.DEFAULT_BOLD);
-        infoPanel.addView(videoFpsLabel, new LinearLayout.LayoutParams(-2, -2));
+        videoCameraLabel = Ui.text(this, "a6300 · PC REMOTE", 10, COLOR_DIM, true);
+        videoCameraLabel.setLetterSpacing(0.12f);
+        infoPanel.addView(videoCameraLabel, new LinearLayout.LayoutParams(-2, -2));
 
-        videoExposureLabel = new TextView(this);
-        videoExposureLabel.setTextColor(COLOR_TEXT);
-        videoExposureLabel.setTextSize(12);
+        videoFpsLabel = Ui.text(this, "FPS 0", Ui.SIZE_BODY, COLOR_TEXT, true);
+        infoPanel.addView(videoFpsLabel, lp(-2, -2, 0, 0, dp(5), 0, 0));
+
+        videoExposureLabel = Ui.text(this, "", Ui.SIZE_LABEL, COLOR_TEXT, false);
         videoExposureLabel.setVisibility(View.GONE);
-        LinearLayout.LayoutParams exposureLp = new LinearLayout.LayoutParams(-2, -2);
-        exposureLp.topMargin = dp(4);
-        infoPanel.addView(videoExposureLabel, exposureLp);
+        infoPanel.addView(videoExposureLabel, lp(-2, -2, 0, 0, dp(3), 0, 0));
 
-        videoBatteryLabel = new TextView(this);
-        videoBatteryLabel.setTextColor(COLOR_OK);
-        videoBatteryLabel.setTextSize(12);
+        videoBatteryLabel = Ui.text(this, "", Ui.SIZE_LABEL, COLOR_OK, false);
         videoBatteryLabel.setVisibility(View.GONE);
-        LinearLayout.LayoutParams batteryLp = new LinearLayout.LayoutParams(-2, -2);
-        batteryLp.topMargin = dp(2);
-        infoPanel.addView(videoBatteryLabel, batteryLp);
+        infoPanel.addView(videoBatteryLabel, lp(-2, -2, 0, 0, dp(2), 0, 0));
 
         FrameLayout.LayoutParams panelParams = new FrameLayout.LayoutParams(-2, -2);
         panelParams.gravity = Gravity.TOP | Gravity.END;
         panelParams.setMargins(0, dp(12), dp(12), 0);
+        stageInfoPanel = infoPanel;
         page.addView(infoPanel, panelParams);
 
-        // Bottom-right: the filming tools as a compact row. Active toggles
-        // light up with their own color (peaking color / amber / accent).
+        // Bottom-right: the filming tools, grouped in a single toolbar so they
+        // read as one control surface instead of six floating chips.
         LinearLayout tools = new LinearLayout(this);
         tools.setOrientation(LinearLayout.HORIZONTAL);
+        tools.setGravity(Gravity.CENTER_VERTICAL);
+        tools.setPadding(dp(6), dp(4), dp(6), dp(4));
+        tools.setBackground(Ui.surface(this, 0xB3000000, Ui.COLOR_HAIRLINE, 12));
 
-        peakingButton = makeOverlayButton("Peak: Off");
+        peakingButton = Ui.toolChip(this, "Peak: Off");
         peakingButton.setOnClickListener(v -> cyclePeaking());
-        tools.addView(peakingButton, lp(-2, -2, 0, 0, 0, dp(6), 0));
+        tools.addView(peakingButton, lp(-2, dp(34), 0, 0, 0, dp(4), 0));
 
-        zebraButton = makeOverlayButton("Zebra: Off");
+        zebraButton = Ui.toolChip(this, "Zebra: Off");
         zebraButton.setOnClickListener(v -> toggleZebra());
-        tools.addView(zebraButton, lp(-2, -2, 0, 0, 0, dp(6), 0));
+        tools.addView(zebraButton, lp(-2, dp(34), 0, 0, 0, dp(4), 0));
 
-        gridButton = makeOverlayButton("Grid: Off");
+        tools.addView(toolDivider(), lp(dp(1), dp(16), 0, 0, 0, dp(6), 0));
+
+        gridButton = Ui.toolChip(this, "Grid: Off");
         gridButton.setOnClickListener(v -> toggleGrid());
-        tools.addView(gridButton, lp(-2, -2, 0, 0, 0, dp(6), 0));
+        tools.addView(gridButton, lp(-2, dp(34), 0, 0, 0, dp(4), 0));
 
-        desqueezeButton = makeOverlayButton("DeSq: Off");
+        desqueezeButton = Ui.toolChip(this, "DeSq: Off");
         desqueezeButton.setOnClickListener(v -> cycleDesqueeze());
-        tools.addView(desqueezeButton, lp(-2, -2, 0, 0, 0, dp(6), 0));
+        tools.addView(desqueezeButton, lp(-2, dp(34), 0, 0, 0, dp(4), 0));
 
-        scopeButton = makeOverlayButton("Scope: Off");
+        scopeButton = Ui.toolChip(this, "Scope: Off");
         scopeButton.setOnClickListener(v -> cycleScope());
-        tools.addView(scopeButton, lp(-2, -2, 0, 0, 0, dp(6), 0));
+        tools.addView(scopeButton, lp(-2, dp(34), 0, 0, 0, dp(4), 0));
 
-        histogramButton = makeOverlayButton("Hist: Off");
+        tools.addView(toolDivider(), lp(dp(1), dp(16), 0, 0, 0, dp(6), 0));
+
+        histogramButton = Ui.toolChip(this, "Hist: Off");
         histogramButton.setOnClickListener(v -> toggleHistogram());
-        tools.addView(histogramButton, lp(-2, -2, 0, 0, 0, 0, 0));
+        tools.addView(histogramButton, lp(-2, dp(34), 0, 0, 0, 0, 0));
 
         FrameLayout.LayoutParams toolsParams = new FrameLayout.LayoutParams(-2, -2);
         toolsParams.gravity = Gravity.BOTTOM | Gravity.END;
         toolsParams.setMargins(0, 0, dp(12), dp(12));
+        stageTools = tools;
         page.addView(tools, toolsParams);
 
         histogramView = new HistogramView(this);
         histogramView.setVisibility(View.GONE);
-        FrameLayout.LayoutParams histViewParams = new FrameLayout.LayoutParams(dp(150), dp(66));
+        FrameLayout.LayoutParams histViewParams = new FrameLayout.LayoutParams(dp(158), dp(70));
         histViewParams.gravity = Gravity.BOTTOM | Gravity.START;
         histViewParams.setMargins(dp(12), 0, 0, dp(12));
         page.addView(histogramView, histViewParams);
@@ -426,17 +663,11 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         recBorder.setBackground(recBorderBackground);
         page.addView(recBorder, new FrameLayout.LayoutParams(-1, -1));
 
-        videoStatusLabel = new TextView(this);
-        videoStatusLabel.setTextColor(COLOR_BUSY);
-        videoStatusLabel.setTextSize(13);
+        videoStatusLabel = Ui.text(this, "", Ui.SIZE_LABEL, COLOR_BUSY, true);
         videoStatusLabel.setGravity(Gravity.CENTER);
-        videoStatusLabel.setPadding(dp(12), dp(6), dp(12), dp(6));
+        videoStatusLabel.setPadding(dp(12), dp(7), dp(12), dp(7));
         videoStatusLabel.setVisibility(View.GONE);
-        GradientDrawable statusBackground = new GradientDrawable();
-        statusBackground.setColor(0xCC141A20);
-        statusBackground.setStroke(dp(1), COLOR_BUSY);
-        statusBackground.setCornerRadius(dp(8));
-        videoStatusLabel.setBackground(statusBackground);
+        videoStatusLabel.setBackground(Ui.surface(this, 0xE6141A20, COLOR_BUSY, 8));
         FrameLayout.LayoutParams statusParams = new FrameLayout.LayoutParams(-2, -2);
         statusParams.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
         statusParams.setMargins(0, 0, 0, dp(16));
@@ -445,50 +676,24 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         return page;
     }
 
-    private Button makeOverlayButton(String text) {
-        Button button = new Button(this);
-        button.setText(text);
-        button.setTextColor(COLOR_TEXT);
-        button.setTextSize(12);
-        button.setAllCaps(false);
-        button.setMinHeight(dp(34));
-        button.setMinWidth(0);
-        button.setPadding(dp(12), 0, dp(12), 0);
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(0xB3000000);
-        background.setStroke(dp(1), 0x3380CBC4);
-        background.setCornerRadius(dp(9));
-        button.setBackground(background);
-        return button;
+    /** Thin vertical rule that separates groups of tool chips. */
+    private View toolDivider() {
+        View divider = new View(this);
+        divider.setBackgroundColor(0x33FFFFFF);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(1), dp(16));
+        divider.setLayoutParams(params);
+        return divider;
     }
 
-    /** Colors an overlay toggle's text and border to show its active state. */
+    /** Colors a tool chip to show its active state. */
     private void styleToggle(Button button, boolean active, int activeColor) {
-        button.setTextColor(active ? activeColor : COLOR_TEXT);
-        GradientDrawable background = (GradientDrawable) button.getBackground();
-        background.setStroke(dp(1), active ? activeColor : 0x3380CBC4);
+        Ui.styleChip(button, active, activeColor);
     }
 
     private LinearLayout spacer() {
         LinearLayout spacer = new LinearLayout(this);
         spacer.setOrientation(LinearLayout.HORIZONTAL);
         return spacer;
-    }
-
-    private Button makeButton(String text, int accent) {
-        Button button = new Button(this);
-        button.setText(text);
-        button.setTextColor(accent);
-        button.setTextSize(13);
-        button.setAllCaps(false);
-        button.setMinHeight(dp(42));
-        button.setPadding(dp(18), 0, dp(18), 0);
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(COLOR_PANEL);
-        background.setStroke(dp(1), accent);
-        background.setCornerRadius(dp(10));
-        button.setBackground(background);
-        return button;
     }
 
     private void setButtonEnabled(Button button, boolean enabled) {
@@ -567,7 +772,7 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     }
 
     private void showVideoPage() {
-        startingView.setVisibility(View.VISIBLE);
+        startingPanel.setVisibility(View.VISIBLE);
         flipper.setDisplayedChild(PAGE_VIDEO);
         // The filming stage goes edge-to-edge: hide the system bars so the
         // frame fills the screen; a swipe reveals them transiently.
@@ -607,7 +812,7 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         statusLabel.setTextColor(color);
     }
 
-    private LinearLayout.LayoutParams lp(int width, int height, int weight,
+    private LinearLayout.LayoutParams lp(int width, int height, float weight,
             int left, int top, int right, int bottom) {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(width, height);
         if (weight > 0) params.weight = weight;
@@ -627,7 +832,15 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         usbReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
-                if (!ACTION_USB_PERMISSION.equals(intent.getAction())) return;
+                String action = intent.getAction();
+                if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action) ||
+                        UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action)) {
+                    // A camera was plugged in or pulled out: refresh the card
+                    // so the page always shows the current USB state.
+                    updateDeviceCard();
+                    return;
+                }
+                if (!ACTION_USB_PERMISSION.equals(action)) return;
                 UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
                 boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
                 Log.i(TAG, "USB permission result granted=" + granted +
@@ -642,11 +855,44 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
             }
         };
         IntentFilter filter = new IntentFilter(ACTION_USB_PERMISSION);
+        filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
+        filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
         } else {
             registerReceiver(usbReceiver, filter);
         }
+    }
+
+    /**
+     * Shows the attached USB camera in the device card: product name, USB
+     * identity and whether it is the a6300 in PC Remote mode.
+     */
+    private void updateDeviceCard() {
+        if (deviceNameLabel == null) return;
+        UsbDevice device = findPtpDevice();
+        if (device == null) {
+            deviceNameLabel.setText("No camera attached");
+            deviceDetailLabel.setText(
+                    "Set USB Connection to PC Remote, then plug in the OTG cable.");
+            setCardAccent(COLOR_DIM);
+            return;
+        }
+        String identity = String.format(Locale.US, "%04x:%04x",
+                device.getVendorId(), device.getProductId());
+        boolean sony = device.getVendorId() == SONY_VENDOR_ID &&
+                device.getProductId() == A6300_PC_REMOTE_PRODUCT_ID;
+        deviceNameLabel.setText(sony ? "Sony a6300" : "USB device " + device.getDeviceName());
+        deviceDetailLabel.setText(identity + "  ·  " +
+                device.getInterfaceCount() + " interface(s)" +
+                (sony ? "  ·  PC Remote" : ""));
+        setCardAccent(sony ? COLOR_ACCENT : COLOR_BUSY);
+    }
+
+    private void setCardAccent(int color) {
+        if (deviceAccent == null) return;
+        deviceAccent.setBackground(Ui.surface(this, color,
+                android.graphics.Color.TRANSPARENT, 2));
     }
 
     private void requestCameraPermission() {
@@ -656,10 +902,12 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         }
         UsbDevice device = findPtpDevice();
         if (device == null) {
+            updateDeviceCard();
             appendStatus("No PTP camera found. Set USB Connection to PC Remote and reconnect.");
             setButtonEnabled(connectButton, true);
             return;
         }
+        updateDeviceCard();
         String deviceSummary = "Found USB device: " + device.getDeviceName() +
                 " VID=" + Integer.toHexString(device.getVendorId()) +
                 " PID=" + Integer.toHexString(device.getProductId());
@@ -690,6 +938,7 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     }
 
     private UsbDevice findPtpDevice() {
+        if (usbManager == null) return null;
         for (UsbDevice device : usbManager.getDeviceList().values()) {
             for (int i = 0; i < device.getInterfaceCount(); i++) {
                 if (device.getInterface(i).getInterfaceClass() == 6) return device;
@@ -776,6 +1025,7 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         runOnUiThread(() -> {
             String label = "BATTERY " + percent + "%";
             connectionBatteryLabel.setText(label);
+            connectionBatteryLabel.setVisibility(View.VISIBLE);
             videoBatteryLabel.setText(label);
             videoBatteryLabel.setVisibility(View.VISIBLE);
         });
@@ -881,7 +1131,7 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
         final Bitmap shownBitmap = bitmap;
         runOnUiThread(() -> {
             previewView.setImageBitmap(shownBitmap);
-            startingView.setVisibility(View.GONE);
+            startingPanel.setVisibility(View.GONE);
             videoStatusLabel.setVisibility(View.GONE);
             // Grid and scope follow the displayed (desqueezed) image rectangle.
             int shownWidth = Math.round(width * desqueezeFactor);
@@ -916,6 +1166,7 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
             videoFpsLabel.setText("FPS 0");
             batteryPercent = -1;
             connectionBatteryLabel.setText("");
+            connectionBatteryLabel.setVisibility(View.GONE);
             videoBatteryLabel.setText("");
             videoBatteryLabel.setVisibility(View.GONE);
             videoExposureLabel.setText("");
@@ -932,16 +1183,32 @@ public final class MainActivity extends Activity implements PtpUsbCamera.Listene
     private void appendStatus(String message) {
         Log.d(TAG, "UI status: " + message);
         if (logView == null) return;
-        String line = timeFormat.format(new Date()) + "  " + message;
+        String stamp = timeFormat.format(new Date());
         String current = logView.getText().toString();
-        String[] lines = (current + "\n" + line).split("\\n");
+        String[] lines = (current + "\n" + stamp + "  " + message).split("\\n");
         int start = Math.max(0, lines.length - MAX_LOG_LINES);
         StringBuilder visible = new StringBuilder();
         for (int i = start; i < lines.length; i++) {
             if (visible.length() > 0) visible.append('\n');
             visible.append(lines[i]);
         }
-        logView.setText(visible.toString());
+        // Timestamps are dimmed so the messages carry the eye.
+        SpannableStringBuilder styled = new SpannableStringBuilder(visible);
+        String plain = visible.toString();
+        int lineStart = 0;
+        while (lineStart < plain.length()) {
+            int lineEnd = plain.indexOf('\n', lineStart);
+            if (lineEnd < 0) lineEnd = plain.length();
+            styled.setSpan(new ForegroundColorSpan(0xFF55636D), lineStart,
+                    Math.min(lineStart + stamp.length(), lineEnd),
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            lineStart = lineEnd + 1;
+        }
+        logView.setText(styled);
+        if (logCountLabel != null) {
+            int count = lines.length - start;
+            logCountLabel.setText(count + (count == 1 ? " line" : " lines"));
+        }
         logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
     }
 

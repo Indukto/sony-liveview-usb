@@ -157,7 +157,20 @@ PTP2 path and adds experiment levers:
   only once, then `GetObject` alone while it keeps returning `0x2001` (one
   fewer PTP round trip per frame). If a `GetObject` fails, `GetObjectInfo` is
   re-issued to re-sync. This is the first experiment worth running.
-The video page is laid out as a filming stage: the live view runs edge-to-edge
+
+## The two pages
+
+The app has two pages. The **connection page** is the control desk, laid out as
+two columns because the app is landscape-only: the left column holds the device
+card (the attached USB device - name, `VID:PID`, interface count, and whether
+it is the a6300 in PC Remote mode; the card refreshes on USB attach/detach),
+the action buttons, the experimental `Skip GetObjectInfo` lever and the
+three-step setup checklist; the right column is the session log, a monospace
+panel with dimmed timestamps, a line counter and a clear button. The app bar
+across the top carries the wordmark, the live status dot and the camera's
+battery level.
+
+The **video page** is laid out as a filming stage: the live view runs edge-to-edge
 in immersive fullscreen (system bars hidden; swipe to reveal), with a single
 translucent readout panel in the top-right corner (FPS/interval, exposure,
 battery) and a compact tool row along the bottom-right:
@@ -247,3 +260,26 @@ the camera:
 Note that the a6300's live-view frame rate itself varies with scene and
 exposure (a long exposure in a dark scene drops the frame rate), which is
 camera-side and independent of these host-side changes.
+
+## Known limitation of the supplied capture
+
+The `sony-a6300-imaging-edge-liveview.pcapng` file in this folder was recorded
+with a 65 535-byte snap length, and **99 of its bulk-IN packets are exactly
+that long**. Those 99 packets are the 99 JPEG frame transfers the README refers
+to, and every one of them is cut short: the pcapng records the original
+transfer length (104 KB to 167 KB) but keeps only the first 65 535 bytes, so
+about 10 MB of frame data is missing from the file.
+
+Consequences:
+
+- The PTP command/response exchange, the container structure, the property
+  block and the frame *cadence* in the capture are all intact and remain the
+  reference for the protocol work.
+- The JPEG frames themselves are **incomplete**. Decoding one yields the top
+  ~60 % of the 1024×680 picture and grey for the rest, so the capture cannot
+  be used to produce a full-quality still or a full live-view frame.
+
+If complete frames are needed (for example to compare image processing
+against a reference), re-record the capture with a larger snap length
+(`USBPcap` "Snapshot size" of 512 KB or more) and check that no packet
+reaches the snap length.

@@ -2,9 +2,14 @@
 <resources>
     <style name="AppTheme" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:fontFamily">sans</item>
-        <item name="android:colorAccent">#80cbc4</item>
+        <item name="android:colorAccent">#80CBC4</item>
+        <item name="android:windowBackground">@color/app_background</item>
         <item name="android:navigationBarColor">#000000</item>
         <item name="android:statusBarColor">#101418</item>
         <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <!-- The stage is edge-to-edge; the app keeps its own chrome clear of
+             the display cutout. -->
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
     </style>
 </resources>
